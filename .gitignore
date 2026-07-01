@@ -1,0 +1,101 @@
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+
+/.idea
+/.vscode
+/.fleet
+/.nova
+/.zed
+
+*.swp
+*.swo
+*~
+
+# =========================
+# Environment
+# =========================
+.env
+.env.*
+!.env.example
+
+auth.json
+
+# =========================
+# PHP / Laravel
+# =========================
+/vendor
+.phpunit.result.cache
+/.phpunit.cache
+.phpactor.json
+
+/storage/*.key
+/storage/pail
+
+# Laravel storage generated files
+/storage/framework/cache/*
+/storage/framework/sessions/*
+/storage/framework/views/*
+/storage/framework/testing/*
+!/storage/framework/cache/.gitignore
+!/storage/framework/sessions/.gitignore
+!/storage/framework/views/.gitignore
+!/storage/framework/testing/.gitignore
+
+/storage/logs/*
+!/storage/logs/.gitignore
+
+/bootstrap/cache/*
+!/bootstrap/cache/.gitignore
+
+# =========================
+# Node / React / Vite
+# =========================
+/node_modules
+/public/build
+/public/hot
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Database / SQLite
+# =========================
+*.sqlite
+*.sqlite3
+database/*.sqlite
+database/*.sqlite3
+
+# =========================
+# Testing / Coverage
+# =========================
+/coverage
+/.nyc_output
+
+# =========================
+# Build / Cache
+# =========================
+/.cache
+/.parcel-cache
+
+# =========================
+# Composer / Laravel Sail / Homestead
+# =========================
+Homestead.json
+Homestead.yaml
+
+docker-compose.override.yml
+
+# =========================
+# Local uploaded/generated files
+# =========================
+/public/storage
