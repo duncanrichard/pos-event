@@ -332,13 +332,8 @@ export default function ProdukPriceIndexPage() {
                 return "Isi bundle minimal 1 produk.";
             }
 
-            const duplicateProduk = validItems
-                .map((item) => item.produk_id)
-                .filter((produkId, index, array) => array.indexOf(produkId) !== index);
-
-            if (duplicateProduk.length > 0) {
-                return "Produk di dalam bundle tidak boleh duplikat.";
-            }
+            // Produk yang sama boleh dimasukkan lebih dari 1 baris.
+            // Contoh: Produk A x1 dan Produk A x2 tetap disimpan sebagai item terpisah.
         }
 
         return "";

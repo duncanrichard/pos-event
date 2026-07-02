@@ -330,20 +330,8 @@ class ProdukPriceController extends Controller
                 ], 422));
             }
 
-            $duplicateProdukIds = $items
-                ->pluck('produk_id')
-                ->duplicates()
-                ->values();
-
-            if ($duplicateProdukIds->count() > 0) {
-                abort(response()->json([
-                    'message' => 'Produk di dalam bundle tidak boleh duplikat.',
-                    'errors' => [
-                        'items' => ['Produk di dalam bundle tidak boleh duplikat.'],
-                    ],
-                ], 422));
-            }
-
+            // Produk yang sama boleh dimasukkan lebih dari 1 baris pada bundle.
+            // Data tidak digabung otomatis agar komposisi bundle tetap sesuai input user.
             $validated['items'] = $items->all();
         }
 

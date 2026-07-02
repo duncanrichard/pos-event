@@ -8,6 +8,8 @@ Route::view('/dashboard', 'app')->name('dashboard');
 
 require __DIR__ . '/auth.php';
 
+require __DIR__ . '/dashboard.php';
+
 require __DIR__ . '/kategori-produk.php';
 require __DIR__ . '/package.php';
 require __DIR__ . '/brand.php';
