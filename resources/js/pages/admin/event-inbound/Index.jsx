@@ -40,6 +40,10 @@ export default function EventInboundIndexPage() {
 
     const isEdit = useMemo(() => Boolean(editingId), [editingId]);
 
+    const singleProdukPriceOptions = useMemo(() => {
+        return produkPriceOptions.filter((item) => isSingleProdukPrice(item));
+    }, [produkPriceOptions]);
+
     useEffect(() => {
         fetchOptions();
     }, []);
@@ -71,12 +75,16 @@ export default function EventInboundIndexPage() {
             setSupplierOptions(
                 Array.isArray(payload.suppliers) ? payload.suppliers : []
             );
-            setEventOptions(Array.isArray(payload.events) ? payload.events : []);
-            setProdukPriceOptions(
-                Array.isArray(payload.produk_prices)
-                    ? payload.produk_prices
-                    : []
-            );
+            const nextEvents = Array.isArray(payload.events)
+                ? payload.events.filter((item) => isActiveEvent(item))
+                : [];
+
+            setEventOptions(nextEvents);
+            const nextProdukPrices = Array.isArray(payload.produk_prices)
+                ? payload.produk_prices.filter((item) => isSingleProdukPrice(item))
+                : [];
+
+            setProdukPriceOptions(nextProdukPrices);
         } catch (err) {
             console.error(err);
             setError("Gagal memuat pilihan event inbound.");
@@ -232,8 +240,7 @@ export default function EventInboundIndexPage() {
     };
 
     const handleDelete = async (row) => {
-        const productName =
-            row.produk_price?.produk?.nama_produk || "produk ini";
+        const productName = getProdukPriceName(row.produk_price) || "produk ini";
 
         const confirmed = window.confirm(
             `Hapus inbound untuk "${productName}"?`
@@ -397,12 +404,15 @@ export default function EventInboundIndexPage() {
 
                                                     <td className="min-w-[240px] px-5 py-4">
                                                         <div className="font-black text-slate-950">
-                                                            {row.produk_price?.produk?.nama_produk ||
-                                                                "-"}
+                                                            {getProdukPriceName(row.produk_price)}
                                                         </div>
-                                                        <div className="mt-0.5 text-xs font-semibold text-slate-400">
-                                                            {row.produk_price?.produk?.product_number ||
-                                                                "-"}
+                                                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                                                            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-wide text-emerald-700 ring-1 ring-emerald-100">
+                                                                Single
+                                                            </span>
+                                                            <span className="text-xs font-semibold text-slate-400">
+                                                                {getProdukPriceCode(row.produk_price)}
+                                                            </span>
                                                         </div>
                                                     </td>
 
@@ -470,7 +480,7 @@ export default function EventInboundIndexPage() {
                     form={form}
                     supplierOptions={supplierOptions}
                     eventOptions={eventOptions}
-                    produkPriceOptions={produkPriceOptions}
+                    produkPriceOptions={singleProdukPriceOptions}
                     optionLoading={optionLoading}
                     error={error}
                     saving={saving}
@@ -557,12 +567,14 @@ function EventInboundModal({
                                 value={form.event_id}
                                 onChange={onSelectChange}
                                 disabled={saving || optionLoading}
-                                options={eventOptions.map((item) => ({
-                                    value: item.id,
-                                    label: `${item.nama_event} - ${formatDate(
-                                        item.valid_from
-                                    )} s/d ${formatDate(item.valid_until)}`,
-                                }))}
+                                options={eventOptions
+                                    .filter((item) => isActiveEvent(item))
+                                    .map((item) => ({
+                                        value: item.id,
+                                        label: `${item.nama_event} - ${formatDate(
+                                            item.valid_from
+                                        )} s/d ${formatDate(item.valid_until)}`,
+                                    }))}
                                 placeholder="Cari / pilih event"
                                 required
                             />
@@ -594,14 +606,12 @@ function EventInboundModal({
                                         optionLoading ||
                                         !form.event_id
                                     }
-                                    options={produkPriceOptions.map((item) => ({
-                                        value: item.id,
-                                        label: `${item.produk?.nama_produk || "-"} ${
-                                            item.produk?.product_number
-                                                ? `- ${item.produk.product_number}`
-                                                : ""
-                                        } | ${formatRupiah(item.harga_produk)}`,
-                                    }))}
+                                    options={produkPriceOptions
+                                        .filter((item) => isSingleProdukPrice(item))
+                                        .map((item) => ({
+                                            value: item.id,
+                                            label: `${getProdukPriceName(item)} - ${getProdukPriceCode(item)} | ${formatRupiah(item.harga_produk)}`,
+                                        }))}
                                     placeholder={
                                         form.event_id
                                             ? "Cari / pilih produk price"
@@ -912,6 +922,70 @@ function PaginationInfo({
                 </button>
             </div>
         </div>
+    );
+}
+
+
+
+function isActiveEvent(event) {
+    if (!event || !event.valid_until) return false;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const validUntil = new Date(event.valid_until);
+    validUntil.setHours(0, 0, 0, 0);
+
+    return validUntil >= today;
+}
+
+function isSingleProdukPrice(item) {
+    if (!item) return false;
+
+    const tipeHarga = String(
+        item.tipe_harga ||
+            item.type ||
+            (item.nama_bundle ? "bundle" : "single")
+    ).toLowerCase();
+
+    if (tipeHarga === "bundle") {
+        return false;
+    }
+
+    if (item.nama_bundle) {
+        return false;
+    }
+
+    const produkId = item.produk_id || item.produk?.id || item.product?.id;
+
+    return Boolean(produkId);
+}
+
+function getProdukPriceName(item) {
+    if (!item) return "-";
+
+    return (
+        item.produk?.nama_produk ||
+        item.produk?.name ||
+        item.product?.nama_produk ||
+        item.product?.name ||
+        item.nama_produk ||
+        item.product_name ||
+        "-"
+    );
+}
+
+function getProdukPriceCode(item) {
+    if (!item) return "-";
+
+    return (
+        item.produk?.product_number ||
+        item.product?.product_number ||
+        item.product_number ||
+        item.produk?.code_gs1 ||
+        item.product?.code_gs1 ||
+        item.code_gs1 ||
+        "-"
     );
 }
 

@@ -11,8 +11,19 @@ Route::prefix('admin/produk-price')
         Route::get('/options', 'options')->name('options');
         Route::post('/', 'store')->name('store');
 
-        Route::get('/{id}', 'show')->whereUuid('id')->name('show');
-        Route::put('/{id}', 'update')->whereUuid('id')->name('update');
-        Route::patch('/{id}', 'update')->whereUuid('id')->name('patch');
-        Route::delete('/{id}', 'destroy')->whereUuid('id')->name('destroy');
+        Route::get('/{id}', 'show')
+            ->whereUuid('id')
+            ->name('show');
+
+        Route::put('/{id}', 'update')
+            ->whereUuid('id')
+            ->name('update');
+
+        Route::patch('/{id}', 'update')
+            ->whereUuid('id')
+            ->name('patch');
+
+        Route::delete('/{id}', 'destroy')
+            ->whereUuid('id')
+            ->name('destroy');
     });

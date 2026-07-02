@@ -55,8 +55,11 @@ export default function PosIndexPage() {
     const [scanCode, setScanCode] = useState("");
     const [paidAmount, setPaidAmount] = useState("");
     const [paymentId, setPaymentId] = useState("");
+    const [paymentType, setPaymentType] = useState("Lunas");
     const [poProductId, setPoProductId] = useState("");
     const [poQty, setPoQty] = useState(1);
+    const [bundleProductId, setBundleProductId] = useState("");
+    const [bundleQty, setBundleQty] = useState(1);
     const [invoiceSearch, setInvoiceSearch] = useState("");
     const [invoiceTab, setInvoiceTab] = useState("Draft");
 
@@ -103,25 +106,31 @@ export default function PosIndexPage() {
             })
             .map((item) => {
                 const produk = item.produk || item.product || {};
-                const name =
-                    item.nama_produk ||
-                    item.product_name ||
-                    produk.nama_produk ||
-                    produk.name ||
-                    "-";
+                const tipeHarga = item.tipe_harga || (item.nama_bundle ? "bundle" : "single");
+                const isBundle = tipeHarga === "bundle";
 
-                const codeGs1 =
-                    item.code_gs1 ||
-                    item.gs1 ||
-                    produk.code_gs1 ||
-                    produk.gs1 ||
-                    "";
+                const name = isBundle
+                    ? item.nama_bundle || item.nama_produk || item.product_name || "Bundle Tanpa Nama"
+                    : item.nama_produk ||
+                      item.product_name ||
+                      produk.nama_produk ||
+                      produk.name ||
+                      "-";
 
-                const productNumber =
-                    item.product_number ||
-                    produk.product_number ||
-                    produk.kode_produk ||
-                    "";
+                const codeGs1 = isBundle
+                    ? ""
+                    : item.code_gs1 ||
+                      item.gs1 ||
+                      produk.code_gs1 ||
+                      produk.gs1 ||
+                      "";
+
+                const productNumber = isBundle
+                    ? "BUNDLE"
+                    : item.product_number ||
+                      produk.product_number ||
+                      produk.kode_produk ||
+                      "";
 
                 const price = Number(
                     item.harga_produk ||
@@ -131,17 +140,37 @@ export default function PosIndexPage() {
                         0
                 );
 
+                const bundleDetails =
+                    item.bundle_details ||
+                    item.bundleDetails ||
+                    item.bundle_products ||
+                    item.bundleProducts ||
+                    [];
+
+                const typeLabel = isBundle ? "Bundle" : "Satuan";
+
                 return {
                     value: item.id || item.produk_price_id || item.product_price_id,
-                    label: `${name}${codeGs1 ? ` - ${codeGs1}` : ""}${price ? ` - ${formatRupiah(price)}` : ""}`,
+                    label: `${typeLabel} - ${name}${codeGs1 ? ` - ${codeGs1}` : ""}${price ? ` - ${formatRupiah(price)}` : ""}`,
                     nama_produk: name,
                     code_gs1: codeGs1,
                     product_number: productNumber,
                     harga_produk: price,
+                    tipe_harga: tipeHarga,
+                    nama_bundle: item.nama_bundle || "",
+                    bundle_details: bundleDetails,
                     raw: item,
                 };
             });
     }, [products, cart?.event_id, cart?.event?.id, newInvoice.event_id]);
+
+    const singleProductOptions = useMemo(() => {
+        return productOptions.filter((item) => item.tipe_harga !== "bundle");
+    }, [productOptions]);
+
+    const bundleProductOptions = useMemo(() => {
+        return productOptions.filter((item) => item.tipe_harga === "bundle");
+    }, [productOptions]);
 
     const selectedEvent = useMemo(() => {
         return eventOptions.find((item) => item.value === newInvoice.event_id) || null;
@@ -155,10 +184,32 @@ export default function PosIndexPage() {
         return productOptions.find((item) => item.value === poProductId) || null;
     }, [productOptions, poProductId]);
 
+    const selectedBundleProduct = useMemo(() => {
+        return bundleProductOptions.find((item) => item.value === bundleProductId) || null;
+    }, [bundleProductOptions, bundleProductId]);
+
     const totalAmount = Number(cart?.total_amount || 0);
     const totalQty = Number(cart?.total_qty || 0);
     const paidNumber = Number(paidAmount || 0);
-    const changeAmount = Math.max(paidNumber - totalAmount, 0);
+
+    const paymentPaidAmount = Number(cart?.payment?.paid_amount || 0);
+    const paymentRemainingAmount = Number(
+        cart?.payment?.remaining_amount ?? Math.max(totalAmount - paymentPaidAmount, 0)
+    );
+
+    const isPoUnpaid =
+        isPoCart &&
+        isPaidCart &&
+        cart?.payment?.payment_status === "Belum Lunas";
+
+    const canReceivePayment = isDraftCart || isPoUnpaid;
+    const paymentTargetAmount = isPoUnpaid ? paymentRemainingAmount : totalAmount;
+
+    const remainingAfterPayment = isPoUnpaid
+        ? Math.max(paymentRemainingAmount - paidNumber, 0)
+        : Math.max(totalAmount - paidNumber, 0);
+
+    const changeAmount = Math.max(paidNumber - paymentTargetAmount, 0);
 
     useEffect(() => {
         fetchOptions();
@@ -256,8 +307,11 @@ export default function PosIndexPage() {
             setNewInvoice(initialNewInvoice);
             setPaidAmount("");
             setPaymentId("");
+            setPaymentType("Lunas");
             setPoProductId("");
             setPoQty(1);
+            setBundleProductId("");
+            setBundleQty(1);
             setScanCode("");
             setSuccess("Invoice baru berhasil dibuat.");
             setInvoiceTab("Draft");
@@ -281,8 +335,11 @@ export default function PosIndexPage() {
             setCart(response.data.data);
             setPaidAmount("");
             setPaymentId("");
+            setPaymentType("Lunas");
             setPoProductId("");
             setPoQty(1);
+            setBundleProductId("");
+            setBundleQty(1);
             setScanCode("");
 
             if (invoice.status === "Paid") {
@@ -309,6 +366,7 @@ export default function PosIndexPage() {
         setCart(null);
         setPaidAmount("");
         setPaymentId("");
+        setPaymentType("Lunas");
         setPoProductId("");
         setPoQty(1);
         setScanCode("");
@@ -417,6 +475,52 @@ export default function PosIndexPage() {
         }
     };
 
+    const addBundleProduct = async () => {
+        if (!cart?.id) {
+            setError("Buat atau pilih invoice draft terlebih dahulu.");
+            return;
+        }
+
+        if (!isDraftCart) {
+            setError("Invoice sudah tidak bisa ditambah bundle karena bukan Draft.");
+            return;
+        }
+
+        if (!selectedBundleProduct) {
+            setError("Pilih bundle terlebih dahulu.");
+            return;
+        }
+
+        const qty = Number(bundleQty || 0);
+
+        if (!Number.isFinite(qty) || qty < 1) {
+            setError("Qty bundle minimal 1.");
+            return;
+        }
+
+        setSaving(true);
+        setError("");
+        setSuccess("");
+
+        try {
+            const response = await axios.post(`/admin/pos/cart/${cart.id}/scan`, {
+                produk_price_id: selectedBundleProduct.value,
+                qty,
+            });
+
+            setCart(response.data.data);
+            setBundleProductId("");
+            setBundleQty(1);
+            setSuccess("Bundle berhasil ditambahkan.");
+            fetchInvoices();
+        } catch (err) {
+            console.error(err);
+            setError(getValidationMessage(err));
+        } finally {
+            setSaving(false);
+        }
+    };
+
     const updateQty = async (detail, qty) => {
         if (!cart?.id || !isDraftCart) return;
 
@@ -490,8 +594,11 @@ export default function PosIndexPage() {
             setCart(nextCart);
             setPaidAmount("");
             setPaymentId("");
+            setPaymentType("Lunas");
             setPoProductId("");
             setPoQty(1);
+            setBundleProductId("");
+            setBundleQty(1);
             setScanCode("");
             setSuccess(response.data?.message || "Invoice berhasil di-void.");
 
@@ -511,7 +618,7 @@ export default function PosIndexPage() {
     };
 
     const payInvoice = async () => {
-        if (!cart?.id || !isDraftCart) return;
+        if (!cart?.id || !canReceivePayment) return;
 
         const notaWindow = openNotaLoadingWindow();
 
@@ -528,6 +635,7 @@ export default function PosIndexPage() {
             const response = await axios.post(`/admin/pos/cart/${cart.id}/pay`, {
                 payment_id: paymentId,
                 paid_amount: paidAmount,
+                payment_type: isPoCart ? paymentType : "Lunas",
             });
 
             const paidCart = response.data?.data || null;
@@ -551,10 +659,11 @@ export default function PosIndexPage() {
                 showNotaWindowError(notaWindow, "Pembayaran berhasil, tetapi data nota tidak ditemukan.");
             }
 
-            setSuccess(
-                `Pembayaran invoice ${cart.no_invoice} berhasil. Preview print nota otomatis dibuka.`
-            );
+            setSuccess(response.data?.message || `Pembayaran invoice ${cart.no_invoice} berhasil.`);
 
+            setPaidAmount("");
+            setPaymentId("");
+            setPaymentType("Lunas");
             setScanCode("");
             setInvoiceTab("Paid");
             fetchInvoices();
@@ -601,6 +710,7 @@ export default function PosIndexPage() {
         setCart(null);
         setPaidAmount("");
         setPaymentId("");
+        setPaymentType("Lunas");
         setPoProductId("");
         setPoQty(1);
         setScanCode("");
@@ -646,11 +756,18 @@ export default function PosIndexPage() {
                                     scanInputRef={scanInputRef}
                                     handleScanSubmit={handleScanSubmit}
                                     productOptions={productOptions}
+                                    singleProductOptions={singleProductOptions}
+                                    bundleProductOptions={bundleProductOptions}
                                     selectedPoProduct={selectedPoProduct}
                                     setPoProductId={setPoProductId}
                                     poQty={poQty}
                                     setPoQty={setPoQty}
+                                    selectedBundleProduct={selectedBundleProduct}
+                                    setBundleProductId={setBundleProductId}
+                                    bundleQty={bundleQty}
+                                    setBundleQty={setBundleQty}
                                     addPoProduct={addPoProduct}
+                                    addBundleProduct={addBundleProduct}
                                     holdCurrentInvoice={holdCurrentInvoice}
                                     voidInvoice={voidInvoice}
                                     isDraftCart={isDraftCart}
@@ -682,6 +799,12 @@ export default function PosIndexPage() {
                         paymentOptions={paymentOptions}
                         selectedPayment={selectedPayment}
                         changeAmount={changeAmount}
+                        paymentType={paymentType}
+                        setPaymentType={setPaymentType}
+                        paymentPaidAmount={paymentPaidAmount}
+                        paymentRemainingAmount={paymentRemainingAmount}
+                        paymentTargetAmount={paymentTargetAmount}
+                        remainingAfterPayment={remainingAfterPayment}
                         setPaidAmount={setPaidAmount}
                         setPaymentId={setPaymentId}
                         payInvoice={payInvoice}
@@ -689,6 +812,9 @@ export default function PosIndexPage() {
                         previewNota={previewNota}
                         isDraftCart={isDraftCart}
                         isPaidCart={isPaidCart}
+                        isPoCart={isPoCart}
+                        isPoUnpaid={isPoUnpaid}
+                        canReceivePayment={canReceivePayment}
                     />
 
                     <InvoicePanel
@@ -853,11 +979,18 @@ function ScannerCard({
     scanInputRef,
     handleScanSubmit,
     productOptions,
+    singleProductOptions,
+    bundleProductOptions,
     selectedPoProduct,
     setPoProductId,
     poQty,
     setPoQty,
+    selectedBundleProduct,
+    setBundleProductId,
+    bundleQty,
+    setBundleQty,
     addPoProduct,
+    addBundleProduct,
     holdCurrentInvoice,
     voidInvoice,
     isDraftCart,
@@ -870,11 +1003,11 @@ function ScannerCard({
             {isPoCart ? (
                 <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_110px_auto_auto] lg:items-end">
                     <Select2
-                        label="Pilih Produk PO"
+                        label="Pilih Produk / Bundle PO"
                         value={selectedPoProduct}
                         options={productOptions}
                         onChange={(selected) => setPoProductId(selected?.value || "")}
-                        placeholder="Cari nama produk / barcode / GS1"
+                        placeholder="Cari produk / bundle"
                         disabled={saving || !isDraftCart}
                     />
 
@@ -908,55 +1041,97 @@ function ScannerCard({
                     )}
                 </div>
             ) : (
-                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto] lg:items-end">
-                    <form onSubmit={handleScanSubmit} className="min-w-0">
-                        <label className="mb-2 block text-xs font-black uppercase tracking-wide text-slate-500">
-                            Scan Barcode / GS1
-                        </label>
+                <div className="space-y-4">
+                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto] lg:items-end">
+                        <form onSubmit={handleScanSubmit} className="min-w-0">
+                            <label className="mb-2 block text-xs font-black uppercase tracking-wide text-slate-500">
+                                Scan Barcode / GS1 Produk Satuan
+                            </label>
 
-                        <div className="relative">
-                            <span className="absolute left-4 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-xl bg-slate-950 text-xs font-black text-white">
-                                ||
-                            </span>
+                            <div className="relative">
+                                <span className="absolute left-4 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-xl bg-slate-950 text-xs font-black text-white">
+                                    ||
+                                </span>
 
-                            <input
-                                ref={scanInputRef}
-                                type="text"
-                                value={scanCode}
-                                onChange={(e) => setScanCode(e.target.value)}
-                                placeholder={
-                                    isDraftCart
-                                        ? "Scan barcode di sini lalu Enter"
-                                        : "Invoice terkunci"
-                                }
-                                disabled={saving || !isDraftCart}
-                                className="h-14 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-14 pr-4 text-lg font-black text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-950 focus:bg-white disabled:cursor-not-allowed disabled:opacity-60"
-                            />
+                                <input
+                                    ref={scanInputRef}
+                                    type="text"
+                                    value={scanCode}
+                                    onChange={(e) => setScanCode(e.target.value)}
+                                    placeholder={
+                                        isDraftCart
+                                            ? "Scan barcode produk satuan di sini lalu Enter"
+                                            : "Invoice terkunci"
+                                    }
+                                    disabled={saving || !isDraftCart}
+                                    className="h-14 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-14 pr-4 text-lg font-black text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-950 focus:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+                                />
+                            </div>
+                        </form>
+
+                        {isDraftCart && (
+                            <button
+                                type="button"
+                                onClick={holdCurrentInvoice}
+                                disabled={saving}
+                                className="h-14 rounded-2xl bg-amber-500 px-5 text-sm font-black text-white hover:bg-amber-600 disabled:opacity-60"
+                            >
+                                Tunda
+                            </button>
+                        )}
+
+                        {(isDraftCart || isPaidCart) && !isVoidCart && (
+                            <button
+                                type="button"
+                                onClick={voidInvoice}
+                                disabled={saving}
+                                className="inline-flex h-14 items-center justify-center gap-2 rounded-2xl bg-red-600 px-5 text-sm font-black text-white hover:bg-red-700 disabled:opacity-60"
+                            >
+                                <CartIcon className="h-5 w-5" />
+                                {isPaidCart ? "Void Transaksi" : "Void Carts"}
+                            </button>
+                        )}
+                    </div>
+
+                    <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+                        <div className="mb-3">
+                            <p className="text-sm font-black text-blue-800">
+                                Tambah Bundle Pembelian
+                            </p>
+                            <p className="mt-1 text-xs font-bold text-blue-600">
+                                Untuk bundle, pilih nama bundle. Produk di dalam bundle akan tampil di cart dan stok dihitung dari isi bundle.
+                            </p>
                         </div>
-                    </form>
 
-                    {isDraftCart && (
-                        <button
-                            type="button"
-                            onClick={holdCurrentInvoice}
-                            disabled={saving}
-                            className="h-14 rounded-2xl bg-amber-500 px-5 text-sm font-black text-white hover:bg-amber-600 disabled:opacity-60"
-                        >
-                            Tunda
-                        </button>
-                    )}
+                        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_110px_auto] lg:items-end">
+                            <Select2
+                                label="Nama Bundle"
+                                value={selectedBundleProduct}
+                                options={bundleProductOptions}
+                                onChange={(selected) => setBundleProductId(selected?.value || "")}
+                                placeholder="Cari nama bundle"
+                                disabled={saving || !isDraftCart}
+                            />
 
-                    {(isDraftCart || isPaidCart) && !isVoidCart && (
-                        <button
-                            type="button"
-                            onClick={voidInvoice}
-                            disabled={saving}
-                            className="inline-flex h-14 items-center justify-center gap-2 rounded-2xl bg-red-600 px-5 text-sm font-black text-white hover:bg-red-700 disabled:opacity-60"
-                        >
-                            <CartIcon className="h-5 w-5" />
-                            {isPaidCart ? "Void Transaksi" : "Void Carts"}
-                        </button>
-                    )}
+                            <Input
+                                label="Qty"
+                                type="number"
+                                min="1"
+                                value={bundleQty}
+                                onChange={(e) => setBundleQty(e.target.value)}
+                                disabled={saving || !isDraftCart}
+                            />
+
+                            <button
+                                type="button"
+                                onClick={addBundleProduct}
+                                disabled={saving || !isDraftCart || !selectedBundleProduct || Number(bundleQty || 0) < 1}
+                                className="h-14 rounded-2xl bg-blue-700 px-5 text-sm font-black text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                Tambah Bundle
+                            </button>
+                        </div>
+                    </div>
                 </div>
             )}
 
@@ -976,7 +1151,7 @@ function ScannerCard({
 
             {isPoCart && (
                 <div className="mt-3 rounded-2xl bg-blue-50 px-4 py-3 text-xs font-black text-blue-700 ring-1 ring-blue-100">
-                    Mode PO aktif: produk dipilih menggunakan Select2 dan tidak mengurangi stok.
+                    Mode PO aktif: produk dan bundle dipilih menggunakan Select2 dan tidak mengurangi stok.
                 </div>
             )}
 
@@ -1022,13 +1197,25 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                         </h3>
 
                         <p className="mt-1 text-sm font-semibold text-slate-400">
-{isPoCart ? "Pilih produk PO menggunakan Select2 untuk menambahkan item." : "Scan barcode produk untuk menambahkan item."}
+                            {isPoCart
+                                ? "Pilih produk atau bundle PO menggunakan Select2 untuk menambahkan item."
+                                : "Scan produk satuan atau pilih bundle untuk menambahkan item."}
                         </p>
                     </div>
                 ) : (
                     <div className="space-y-3">
                         {cart.details?.map((detail) => {
-                            const produk = detail.produk_price?.produk;
+                            const produkPrice = detail.produk_price || detail.produkPrice || {};
+                            const produk = produkPrice.produk || {};
+                            const isBundle = (produkPrice.tipe_harga || "single") === "bundle";
+                            const bundleDetails =
+                                produkPrice.bundle_details ||
+                                produkPrice.bundleDetails ||
+                                [];
+
+                            const title = isBundle
+                                ? produkPrice.nama_bundle || produkPrice.display_name || "Bundle Tanpa Nama"
+                                : produk.nama_produk || "-";
 
                             return (
                                 <div
@@ -1037,14 +1224,56 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                 >
                                     <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                                         <div className="min-w-0 flex-1">
-                                            <p className="truncate text-base font-black text-slate-950">
-                                                {produk?.nama_produk || "-"}
-                                            </p>
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <p className="truncate text-base font-black text-slate-950">
+                                                    {title}
+                                                </p>
 
-                                            <p className="mt-1 text-xs font-bold text-slate-400">
-                                                PN: {produk?.product_number || "-"} · GS1:{" "}
-                                                {produk?.code_gs1 || "-"}
-                                            </p>
+                                                <span
+                                                    className={`rounded-full px-2.5 py-1 text-[10px] font-black ${
+                                                        isBundle
+                                                            ? "bg-blue-50 text-blue-700 ring-1 ring-blue-100"
+                                                            : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
+                                                    }`}
+                                                >
+                                                    {isBundle ? "BUNDLE" : "SATUAN"}
+                                                </span>
+                                            </div>
+
+                                            {isBundle ? (
+                                                <div className="mt-2 rounded-2xl bg-slate-50 p-3">
+                                                    <p className="mb-2 text-[10px] font-black uppercase tracking-wide text-slate-400">
+                                                        Isi Bundle
+                                                    </p>
+
+                                                    {bundleDetails.length > 0 ? (
+                                                        <div className="space-y-1">
+                                                            {bundleDetails.map((bundleDetail, index) => (
+                                                                <div
+                                                                    key={bundleDetail.id || index}
+                                                                    className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-slate-600"
+                                                                >
+                                                                    <span>
+                                                                        {bundleDetail.produk?.nama_produk || "-"}
+                                                                    </span>
+                                                                    <span className="font-black text-slate-950">
+                                                                        x{bundleDetail.qty || 1}
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <p className="text-xs font-bold text-slate-400">
+                                                            Isi bundle belum tersedia.
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <p className="mt-1 text-xs font-bold text-slate-400">
+                                                    PN: {produk.product_number || "-"} · GS1:{" "}
+                                                    {produk.code_gs1 || "-"}
+                                                </p>
+                                            )}
 
                                             <div className="mt-3 flex flex-wrap gap-2">
                                                 {isPoCart ? (
@@ -1055,13 +1284,13 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                                     />
                                                 ) : (
                                                     <StockBadge
-                                                        label="Stok Terakhir"
+                                                        label={isBundle ? "Bundle Tersedia" : "Stok Terakhir"}
                                                         value={
                                                             detail.stock_terakhir ??
-                                                            detail.produk_price?.stock_terakhir ??
+                                                            produkPrice.stock_terakhir ??
                                                             0
                                                         }
-                                                        type="emerald"
+                                                        type={isBundle ? "blue" : "emerald"}
                                                     />
                                                 )}
                                             </div>
@@ -1124,12 +1353,12 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                                     type="button"
                                                     onClick={() => deleteItem(detail)}
                                                     disabled={saving}
-                                                    className="h-10 rounded-xl bg-red-50 px-3 text-xs font-black text-red-700 ring-1 ring-red-100 hover:bg-red-100 disabled:opacity-50"
+                                                    className="rounded-xl bg-red-50 px-3 py-2 text-xs font-black text-red-700 ring-1 ring-red-100 hover:bg-red-100 disabled:opacity-60"
                                                 >
                                                     Hapus
                                                 </button>
                                             ) : (
-                                                <span className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-400">
+                                                <span className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-500">
                                                     Terkunci
                                                 </span>
                                             )}
@@ -1154,6 +1383,12 @@ function PaymentPanel({
     paymentOptions,
     selectedPayment,
     changeAmount,
+    paymentType,
+    setPaymentType,
+    paymentPaidAmount,
+    paymentRemainingAmount,
+    paymentTargetAmount,
+    remainingAfterPayment,
     setPaidAmount,
     setPaymentId,
     payInvoice,
@@ -1161,9 +1396,26 @@ function PaymentPanel({
     previewNota,
     isDraftCart,
     isPaidCart,
+    isPoCart,
+    isPoUnpaid,
+    canReceivePayment,
 }) {
+    const paidNumber = Number(paidAmount || 0);
+    const isDpPayment = isPoCart && paymentType === "DP";
+
+    const paymentButtonDisabled =
+        !cart ||
+        saving ||
+        !canReceivePayment ||
+        totalAmount <= 0 ||
+        !selectedPayment ||
+        paidNumber <= 0 ||
+        (!isDpPayment && paidNumber < paymentTargetAmount);
+
+    const paymentStatus = cart?.payment?.payment_status || "-";
+
     return (
-        <div className="rounded-[1.5rem] border border-slate-200 bg-white shadow-sm">
+        <div className="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 bg-slate-950 px-5 py-4 text-white">
                 <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-400">
                     Payment
@@ -1172,18 +1424,81 @@ function PaymentPanel({
             </div>
 
             <div className="space-y-4 p-5">
-                <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="grid gap-3">
                     <SummaryRow label="Total Qty" value={totalQty} />
 
-                    <div className="mt-3 rounded-2xl bg-white p-4 shadow-sm">
+                    <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100">
                         <p className="text-xs font-black uppercase tracking-wide text-slate-400">
-                            Total Belanja
+                            Total Transaksi
                         </p>
                         <p className="mt-1 break-words text-3xl font-black text-slate-950">
                             {formatRupiah(totalAmount)}
                         </p>
                     </div>
+
+                    {isPoCart && (
+                        <div className="grid gap-3 md:grid-cols-2">
+                            <PaymentInfoCard
+                                label="Sudah Dibayar"
+                                value={formatRupiah(paymentPaidAmount)}
+                                tone="blue"
+                            />
+                            <PaymentInfoCard
+                                label="Sisa Tagihan"
+                                value={formatRupiah(paymentRemainingAmount)}
+                                tone={paymentRemainingAmount > 0 ? "amber" : "emerald"}
+                            />
+                        </div>
+                    )}
+
+                    {cart?.payment && (
+                        <div
+                            className={`rounded-2xl px-4 py-3 text-sm font-black ring-1 ${
+                                paymentStatus === "Lunas"
+                                    ? "bg-emerald-50 text-emerald-700 ring-emerald-100"
+                                    : "bg-amber-50 text-amber-700 ring-amber-100"
+                            }`}
+                        >
+                            Status Pembayaran: {paymentStatus}
+                        </div>
+                    )}
                 </div>
+
+                {isPoCart && canReceivePayment && (
+                    <div>
+                        <label className="mb-2 block text-sm font-black text-slate-700">
+                            Jenis Pembayaran PO
+                        </label>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            {["DP", "Lunas"].map((type) => {
+                                const active = paymentType === type;
+
+                                return (
+                                    <button
+                                        key={type}
+                                        type="button"
+                                        onClick={() => setPaymentType(type)}
+                                        disabled={saving || !canReceivePayment}
+                                        className={`h-12 rounded-2xl text-sm font-black transition disabled:opacity-60 ${
+                                            active
+                                                ? type === "DP"
+                                                    ? "bg-amber-500 text-white shadow-lg shadow-amber-100"
+                                                    : "bg-emerald-600 text-white shadow-lg shadow-emerald-100"
+                                                : "bg-slate-50 text-slate-600 ring-1 ring-slate-200 hover:bg-white"
+                                        }`}
+                                    >
+                                        {type}
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        <p className="mt-2 text-xs font-bold text-slate-500">
+                            DP boleh lebih kecil dari total PO. Lunas wajib sama dengan atau lebih besar dari sisa tagihan.
+                        </p>
+                    </div>
+                )}
 
                 <Select2
                     label="Metode Pembayaran"
@@ -1191,17 +1506,30 @@ function PaymentPanel({
                     options={paymentOptions}
                     onChange={(selected) => setPaymentId(selected?.value || "")}
                     placeholder="Pilih metode pembayaran"
-                    disabled={!cart || saving || !isDraftCart}
+                    disabled={!cart || saving || !canReceivePayment}
                 />
 
                 <Input
-                    label="Jumlah Dibayar"
+                    label={isPoUnpaid ? "Jumlah Pelunasan" : isPoCart && paymentType === "DP" ? "Jumlah DP" : "Jumlah Dibayar"}
                     type="number"
                     value={paidAmount}
                     onChange={(e) => setPaidAmount(e.target.value)}
                     placeholder="0"
-                    disabled={!cart || saving || !isDraftCart}
+                    disabled={!cart || saving || !canReceivePayment}
                 />
+
+                {isPoCart && canReceivePayment && (
+                    <div className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-100">
+                        <p className="text-xs font-black uppercase tracking-wide text-slate-500">
+                            Sisa Setelah Pembayaran Ini
+                        </p>
+                        <p className={`mt-1 break-words text-2xl font-black ${
+                            remainingAfterPayment > 0 ? "text-amber-600" : "text-emerald-600"
+                        }`}>
+                            {formatRupiah(remainingAfterPayment)}
+                        </p>
+                    </div>
+                )}
 
                 <div className="rounded-2xl bg-emerald-50 p-4 ring-1 ring-emerald-100">
                     <p className="text-xs font-black uppercase tracking-wide text-emerald-600">
@@ -1212,21 +1540,20 @@ function PaymentPanel({
                     </p>
                 </div>
 
-                <button
-                    type="button"
-                    onClick={payInvoice}
-                    disabled={
-                        !cart ||
-                        saving ||
-                        !isDraftCart ||
-                        totalAmount <= 0 ||
-                        !selectedPayment ||
-                        Number(paidAmount || 0) < totalAmount
-                    }
-                    className="h-16 w-full rounded-2xl bg-emerald-600 text-base font-black text-white shadow-lg shadow-emerald-100 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                    Bayar Sekarang
-                </button>
+                {canReceivePayment && (
+                    <button
+                        type="button"
+                        onClick={payInvoice}
+                        disabled={paymentButtonDisabled}
+                        className="h-16 w-full rounded-2xl bg-emerald-600 text-base font-black text-white shadow-lg shadow-emerald-100 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                        {isPoUnpaid
+                            ? "Bayar Pelunasan"
+                            : isPoCart && paymentType === "DP"
+                            ? "Simpan DP"
+                            : "Bayar Lunas"}
+                    </button>
+                )}
 
                 {isPaidCart && (
                     <button
@@ -1251,6 +1578,24 @@ function PaymentPanel({
                     </button>
                 )}
             </div>
+        </div>
+    );
+}
+
+function PaymentInfoCard({ label, value, tone = "slate" }) {
+    const tones = {
+        blue: "bg-blue-50 text-blue-700 ring-blue-100",
+        amber: "bg-amber-50 text-amber-700 ring-amber-100",
+        emerald: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+        slate: "bg-slate-50 text-slate-700 ring-slate-100",
+    };
+
+    return (
+        <div className={`rounded-2xl p-4 ring-1 ${tones[tone] || tones.slate}`}>
+            <p className="text-[10px] font-black uppercase tracking-wide opacity-70">
+                {label}
+            </p>
+            <p className="mt-1 break-words text-lg font-black">{value}</p>
         </div>
     );
 }
@@ -1389,12 +1734,28 @@ function InvoicePanel({
                                 </div>
 
                                 {invoice.payment && (
-                                    <div className="mt-3 rounded-2xl bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 ring-1 ring-emerald-100">
-                                        Payment: {formatRupiah(invoice.payment.total_amount || 0)}
-                                        {" · "}
-                                        Bayar: {formatRupiah(invoice.payment.paid_amount || 0)}
-                                        {" · "}
-                                        Kembali: {formatRupiah(invoice.payment.change_amount || 0)}
+                                    <div
+                                        className={`mt-3 rounded-2xl px-3 py-2 text-xs font-black ring-1 ${
+                                            invoice.payment.payment_status === "Lunas"
+                                                ? "bg-emerald-50 text-emerald-700 ring-emerald-100"
+                                                : "bg-amber-50 text-amber-700 ring-amber-100"
+                                        }`}
+                                    >
+                                        <div>
+                                            Status: {invoice.payment.payment_status || "-"}
+                                            {" · "}
+                                            Jenis: {invoice.payment.payment_type || "-"}
+                                        </div>
+                                        <div className="mt-1">
+                                            Total: {formatRupiah(invoice.payment.total_amount || 0)}
+                                            {" · "}
+                                            Bayar: {formatRupiah(invoice.payment.paid_amount || 0)}
+                                        </div>
+                                        <div className="mt-1">
+                                            Sisa: {formatRupiah(invoice.payment.remaining_amount || 0)}
+                                            {" · "}
+                                            Kembali: {formatRupiah(invoice.payment.change_amount || 0)}
+                                        </div>
                                     </div>
                                 )}
 
@@ -1879,6 +2240,8 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
     const cashierName = cashier.name || "-";
     const paymentMethod = payment.payment_method || "-";
     const paymentStatus = payment.payment_status || invoice.status || "-";
+    const paymentType = payment.payment_type || "-";
+    const remainingAmountValue = Number(payment.remaining_amount || 0);
     const transactionType = normalizeTransactionType(
         invoice.transaction_type || nota.transaction_type
     );
@@ -1904,6 +2267,21 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
             const price = Number(item.harga || 0);
             const subtotal = Number(item.subtotal || 0);
 
+            const isBundle = item.tipe_harga === "bundle";
+            const bundleDetails = Array.isArray(item.bundle_details) ? item.bundle_details : [];
+            const bundleHtml =
+                isBundle && bundleDetails.length
+                    ? `
+                        <div class="bundle-items">
+                            ${bundleDetails
+                                .map((detail) => {
+                                    return `<div>• ${escapeHtml(detail.nama_produk || "-")} x${Number(detail.qty || 1)}</div>`;
+                                })
+                                .join("")}
+                        </div>
+                    `
+                    : "";
+
             return `
                 <div class="item-row">
                     <div class="item-top">
@@ -1912,8 +2290,9 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
                     </div>
                     <div class="item-bottom">
                         <span>${qty} x ${formatRupiah(price)}</span>
-                        <span>GS1: ${escapeHtml(item.code_gs1 || "-")}</span>
+                        <span>${isBundle ? "Bundle" : ""}</span>
                     </div>
+                    ${bundleHtml}
                 </div>
             `;
         })
@@ -2385,6 +2764,10 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
                                 <span class="summary-label">Metode</span>
                                 <span class="summary-value">${escapeHtml(paymentMethod)}</span>
                             </div>
+                            <div class="summary-row">
+                                <span class="summary-label">Jenis Bayar</span>
+                                <span class="summary-value">${escapeHtml(paymentType)}</span>
+                            </div>
                             <div class="summary-row total-row">
                                 <span class="summary-label">TOTAL</span>
                                 <span class="summary-value">${formatRupiah(totalAmount)}</span>
@@ -2392,6 +2775,10 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
                             <div class="summary-row">
                                 <span class="summary-label">Bayar</span>
                                 <span class="summary-value">${formatRupiah(paidAmountValue)}</span>
+                            </div>
+                            <div class="summary-row">
+                                <span class="summary-label">Sisa</span>
+                                <span class="summary-value">${formatRupiah(remainingAmountValue)}</span>
                             </div>
                             <div class="summary-row">
                                 <span class="summary-label">Kembalian</span>

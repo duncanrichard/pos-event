@@ -19,6 +19,7 @@ require __DIR__ . '/data-event.php';
 require __DIR__ . '/event-inbound.php';
 require __DIR__ . '/pos.php';
 require __DIR__ . '/report-stok-akhir.php';
+require __DIR__ . '/report-transaksi-customer.php';
 
 // Untuk React Router supaya halaman tidak 404 saat refresh
 Route::fallback(function () {

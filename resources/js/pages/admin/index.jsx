@@ -20,6 +20,7 @@ import ProdukIndexPage from "./data-produk/produk/Index";
 import ProdukPriceIndexPage from "./data-produk/produk-price/Index";
 
 import ReportStokAkhirIndexPage from "./report-stok-akhir/Index";
+import ReportTransaksiCustomerIndexPage from "./report-transaksi-customer/Index";
 
 class PageErrorBoundary extends Component {
     constructor(props) {
@@ -324,6 +325,13 @@ export default function AdminPage() {
             description: "Laporan stok dan transaksi",
             icon: "RP",
             children: [
+                {
+                    key: "report-transaksi-customer",
+                    label: "Transaksi Customer",
+                    description: "Report customer, omset, event, dan produk terjual",
+                    icon: "TC",
+                    component: ReportTransaksiCustomerIndexPage,
+                },
                 {
                     key: "report-stok-akhir",
                     label: "Stok Akhir Event",

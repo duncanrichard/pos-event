@@ -7,10 +7,24 @@ Route::prefix('admin/pos')
     ->name('admin.pos.')
     ->controller(PosController::class)
     ->group(function () {
-        Route::get('/options', 'options')->name('options');
-        Route::get('/drafts', 'drafts')->name('drafts');
+        /*
+        |--------------------------------------------------------------------------
+        | Options & Invoice List
+        |--------------------------------------------------------------------------
+        */
+        Route::get('/options', 'options')
+            ->name('options');
 
-        Route::post('/cart/start', 'startCart')->name('cart.start');
+        Route::get('/drafts', 'drafts')
+            ->name('drafts');
+
+        /*
+        |--------------------------------------------------------------------------
+        | Cart / Invoice
+        |--------------------------------------------------------------------------
+        */
+        Route::post('/cart/start', 'startCart')
+            ->name('cart.start');
 
         Route::get('/cart/{id}', 'showCart')
             ->whereUuid('id')
@@ -20,10 +34,26 @@ Route::prefix('admin/pos')
             ->whereUuid('id')
             ->name('cart.nota');
 
+        /*
+        |--------------------------------------------------------------------------
+        | Add Product / Bundle
+        |--------------------------------------------------------------------------
+        | Produk satuan:
+        | - kirim code_gs1
+        |
+        | Bundle:
+        | - kirim produk_price_id
+        |--------------------------------------------------------------------------
+        */
         Route::post('/cart/{id}/scan', 'scanProduct')
             ->whereUuid('id')
             ->name('cart.scan');
 
+        /*
+        |--------------------------------------------------------------------------
+        | Cart Item
+        |--------------------------------------------------------------------------
+        */
         Route::patch('/cart/{cartId}/item/{detailId}', 'updateItem')
             ->whereUuid('cartId')
             ->whereUuid('detailId')
@@ -34,6 +64,11 @@ Route::prefix('admin/pos')
             ->whereUuid('detailId')
             ->name('cart.item.delete');
 
+        /*
+        |--------------------------------------------------------------------------
+        | Void & Payment
+        |--------------------------------------------------------------------------
+        */
         Route::post('/cart/{id}/void', 'voidCart')
             ->whereUuid('id')
             ->name('cart.void');

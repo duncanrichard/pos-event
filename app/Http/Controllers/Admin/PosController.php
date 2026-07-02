@@ -11,6 +11,7 @@ use App\Models\Payment;
 use App\Models\ProdukPrice;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class PosController extends Controller
 {
@@ -23,9 +24,17 @@ class PosController extends Controller
     private const CART_TYPE_PO = 'PO';
     private const CART_TYPE_PEMBELIAN = 'Pembelian';
 
+    private const PAYMENT_TYPE_DP = 'DP';
+    private const PAYMENT_TYPE_LUNAS = 'Lunas';
+
+    private const PAYMENT_STATUS_LUNAS = 'Lunas';
+    private const PAYMENT_STATUS_BELUM_LUNAS = 'Belum Lunas';
+
     public function options()
     {
         $this->autoVoidExpiredDraftCarts();
+
+        $today = now()->toDateString();
 
         $payments = Payment::query()
             ->orderBy('created_at')
@@ -43,34 +52,28 @@ class PosController extends Controller
             ->values();
 
         $produkPrices = ProdukPrice::query()
+            ->whereHas('event', function ($query) use ($today) {
+                $query->whereDate('valid_until', '>=', $today);
+            })
             ->with([
                 'produk:id,nama_produk,product_number,code_gs1',
+                'bundleDetails:id,produk_price_id,produk_id,qty',
+                'bundleDetails.produk:id,nama_produk,product_number,code_gs1',
             ])
-            ->select('id', 'produk_id', 'event_id', 'harga_produk')
+            ->select([
+                'id',
+                'produk_id',
+                'event_id',
+                'tipe_harga',
+                'nama_bundle',
+                'harga_produk',
+            ])
             ->orderBy('event_id')
+            ->orderBy('tipe_harga')
+            ->orderBy('nama_bundle')
             ->get()
             ->map(function ($produkPrice) {
-                $produk = $produkPrice->produk;
-
-                return [
-                    'id' => $produkPrice->id,
-                    'produk_price_id' => $produkPrice->id,
-                    'product_price_id' => $produkPrice->id,
-                    'produk_id' => $produkPrice->produk_id,
-                    'event_id' => $produkPrice->event_id,
-                    'harga_produk' => (float) ($produkPrice->harga_produk ?? 0),
-                    'price' => (float) ($produkPrice->harga_produk ?? 0),
-                    'nama_produk' => $produk?->nama_produk ?? '-',
-                    'product_name' => $produk?->nama_produk ?? '-',
-                    'product_number' => $produk?->product_number ?? '-',
-                    'code_gs1' => $produk?->code_gs1 ?? '-',
-                    'produk' => [
-                        'id' => $produk?->id,
-                        'nama_produk' => $produk?->nama_produk ?? '-',
-                        'product_number' => $produk?->product_number ?? '-',
-                        'code_gs1' => $produk?->code_gs1 ?? '-',
-                    ],
-                ];
+                return $this->formatProdukPriceOption($produkPrice);
             })
             ->values();
 
@@ -80,7 +83,8 @@ class PosController extends Controller
             'data' => [
                 'events' => DataEvent::query()
                     ->select('id', 'nama_event', 'alamat_event', 'valid_from', 'valid_until')
-                    ->orderByDesc('valid_from')
+                    ->whereDate('valid_until', '>=', $today)
+                    ->orderBy('valid_from')
                     ->orderBy('nama_event')
                     ->get(),
 
@@ -116,9 +120,11 @@ class PosController extends Controller
             ->with([
                 'event:id,nama_event,alamat_event',
                 'details:id,event_carts_id,produk_price_id,qty',
-                'details.produkPrice:id,produk_id,event_id,harga_produk',
+                'details.produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
                 'details.produkPrice.produk:id,nama_produk,product_number,code_gs1',
-                'payment:id,event_carts_id,payment_id,total_amount,paid_amount,change_amount,payment_status,cashier_user_id',
+                'details.produkPrice.bundleDetails:id,produk_price_id,produk_id,qty',
+                'details.produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                'payment:id,event_carts_id,payment_id,payment_type,total_amount,paid_amount,dp_amount,change_amount,remaining_amount,payment_status,cashier_user_id',
                 'payment.payment:id,payment',
                 'payment.cashier:id,name,email',
             ])
@@ -126,11 +132,13 @@ class PosController extends Controller
             ->whereDate('tanggal_carts', $today)
             ->when($search !== '', function ($query) use ($search) {
                 $query->where(function ($subQuery) use ($search) {
+                    $keyword = '%' . mb_strtolower($search) . '%';
+
                     $subQuery
-                        ->where('no_invoice', 'ilike', '%' . $search . '%')
-                        ->orWhere('customer', 'ilike', '%' . $search . '%')
-                        ->orWhereHas('event', function ($eventQuery) use ($search) {
-                            $eventQuery->where('nama_event', 'ilike', '%' . $search . '%');
+                        ->whereRaw('LOWER(no_invoice) LIKE ?', [$keyword])
+                        ->orWhereRaw('LOWER(customer) LIKE ?', [$keyword])
+                        ->orWhereHas('event', function ($eventQuery) use ($keyword) {
+                            $eventQuery->whereRaw('LOWER(nama_event) LIKE ?', [$keyword]);
                         });
                 });
             })
@@ -166,6 +174,8 @@ class PosController extends Controller
             'transaction_type.required' => 'Jenis transaksi wajib dipilih.',
             'transaction_type.in' => 'Jenis transaksi hanya boleh PO atau Pembelian.',
         ]);
+
+        $this->ensureActiveEvent($validated['event_id']);
 
         $cart = new EventCart();
         $cart->event_id = $validated['event_id'];
@@ -247,19 +257,30 @@ class PosController extends Controller
                 ->lockForUpdate()
                 ->findOrFail($id);
 
+            $this->ensureActiveEvent($cart->event_id);
+
             $produkPriceId = $validated['produk_price_id'] ?? null;
             $codeGs1 = trim((string) ($validated['code_gs1'] ?? ''));
 
             $produkPriceQuery = ProdukPrice::query()
-                ->with('produk:id,nama_produk,product_number,code_gs1')
+                ->with([
+                    'produk:id,nama_produk,product_number,code_gs1',
+                    'bundleDetails:id,produk_price_id,produk_id,qty',
+                    'bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                ])
                 ->where('event_id', $cart->event_id);
 
             if ($produkPriceId) {
                 $produkPriceQuery->where('id', $produkPriceId);
             } else {
-                $produkPriceQuery->whereHas('produk', function ($query) use ($codeGs1) {
-                    $query->where('code_gs1', $codeGs1);
-                });
+                $produkPriceQuery
+                    ->where(function ($query) {
+                        $query->whereNull('tipe_harga')
+                            ->orWhere('tipe_harga', 'single');
+                    })
+                    ->whereHas('produk', function ($query) use ($codeGs1) {
+                        $query->where('code_gs1', $codeGs1);
+                    });
             }
 
             $produkPrice = $produkPriceQuery->first();
@@ -270,6 +291,17 @@ class PosController extends Controller
                     'errors' => [
                         'produk_price_id' => [
                             'Produk tidak ditemukan pada event ini.',
+                        ],
+                    ],
+                ], 422);
+            }
+
+            if ($this->isBundlePrice($produkPrice) && $produkPrice->bundleDetails->count() === 0) {
+                return response()->json([
+                    'message' => 'Bundle belum memiliki isi produk.',
+                    'errors' => [
+                        'produk_price_id' => [
+                            'Bundle belum memiliki isi produk.',
                         ],
                     ],
                 ], 422);
@@ -292,11 +324,15 @@ class PosController extends Controller
             );
 
             if (!$this->isPoCart($cart) && $nextQty > $stock['stock_available_for_line']) {
+                $message = $this->isBundlePrice($produkPrice)
+                    ? 'Stok isi bundle tidak mencukupi.'
+                    : 'Stok produk tidak mencukupi.';
+
                 return response()->json([
-                    'message' => 'Stok produk tidak mencukupi.',
+                    'message' => $message,
                     'errors' => [
                         'code_gs1' => [
-                            'Stok tidak mencukupi. Stok terakhir: ' . $stock['stock_terakhir'] .
+                            $message . ' Stok terakhir: ' . $stock['stock_terakhir'] .
                             '. Maksimal qty untuk item ini: ' . $stock['stock_available_for_line'],
                         ],
                     ],
@@ -305,6 +341,7 @@ class PosController extends Controller
                         'stock_terpakai' => $stock['stock_terpakai'],
                         'stock_terakhir' => $stock['stock_terakhir'],
                         'stock_available_for_line' => $stock['stock_available_for_line'],
+                        'bundle_components' => $stock['bundle_components'] ?? [],
                     ],
                 ], 422);
             }
@@ -323,7 +360,9 @@ class PosController extends Controller
 
             return response()->json([
                 'success' => true,
-                'message' => 'Produk berhasil ditambahkan ke invoice.',
+                'message' => $this->isBundlePrice($produkPrice)
+                    ? 'Bundle berhasil ditambahkan ke invoice.'
+                    : 'Produk berhasil ditambahkan ke invoice.',
                 'data' => $this->loadCart($cart->id),
             ]);
         });
@@ -349,6 +388,11 @@ class PosController extends Controller
                 ->findOrFail($cartId);
 
             $detail = EventCartDetail::query()
+                ->with([
+                    'produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
+                    'produkPrice.bundleDetails:id,produk_price_id,produk_id,qty',
+                    'produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                ])
                 ->where('event_carts_id', $cart->id)
                 ->whereNull('deleted_at')
                 ->lockForUpdate()
@@ -363,11 +407,15 @@ class PosController extends Controller
             );
 
             if (!$this->isPoCart($cart) && $nextQty > $stock['stock_available_for_line']) {
+                $message = $detail->produkPrice && $this->isBundlePrice($detail->produkPrice)
+                    ? 'Stok isi bundle tidak mencukupi.'
+                    : 'Stok produk tidak mencukupi.';
+
                 return response()->json([
-                    'message' => 'Stok produk tidak mencukupi.',
+                    'message' => $message,
                     'errors' => [
                         'qty' => [
-                            'Stok tidak mencukupi. Stok terakhir: ' . $stock['stock_terakhir'] .
+                            $message . ' Stok terakhir: ' . $stock['stock_terakhir'] .
                             '. Maksimal qty untuk item ini: ' . $stock['stock_available_for_line'],
                         ],
                     ],
@@ -376,6 +424,7 @@ class PosController extends Controller
                         'stock_terpakai' => $stock['stock_terpakai'],
                         'stock_terakhir' => $stock['stock_terakhir'],
                         'stock_available_for_line' => $stock['stock_available_for_line'],
+                        'bundle_components' => $stock['bundle_components'] ?? [],
                     ],
                 ], 422);
             }
@@ -489,19 +538,20 @@ class PosController extends Controller
 
         $validated = $request->validate([
             'payment_id' => ['required', 'uuid', 'exists:payments,id'],
-            'paid_amount' => ['required', 'numeric', 'min:0'],
+            'paid_amount' => ['required', 'numeric', 'min:0.01'],
+            'payment_type' => ['nullable', 'string', 'in:DP,Lunas'],
         ], [
             'payment_id.required' => 'Metode pembayaran wajib dipilih.',
             'payment_id.uuid' => 'Metode pembayaran tidak valid.',
             'payment_id.exists' => 'Metode pembayaran tidak ditemukan.',
             'paid_amount.required' => 'Jumlah bayar wajib diisi.',
             'paid_amount.numeric' => 'Jumlah bayar harus berupa angka.',
-            'paid_amount.min' => 'Jumlah bayar tidak boleh kurang dari 0.',
+            'paid_amount.min' => 'Jumlah bayar harus lebih dari 0.',
+            'payment_type.in' => 'Jenis pembayaran hanya boleh DP atau Lunas.',
         ]);
 
         return DB::transaction(function () use ($id, $validated) {
             $cart = EventCart::query()
-                ->where('status', self::STATUS_DRAFT)
                 ->whereDate('tanggal_carts', now()->toDateString())
                 ->with([
                     'details.produkPrice:id,produk_id,event_id,harga_produk',
@@ -510,11 +560,23 @@ class PosController extends Controller
                 ->lockForUpdate()
                 ->findOrFail($id);
 
-            if ($cart->payment) {
+            $isPo = $this->isPoCart($cart);
+            $existingPayment = $cart->payment;
+
+            $canReceivePayment =
+                $cart->status === self::STATUS_DRAFT ||
+                (
+                    $isPo &&
+                    $cart->status === self::STATUS_PAID &&
+                    $existingPayment &&
+                    $existingPayment->payment_status === self::PAYMENT_STATUS_BELUM_LUNAS
+                );
+
+            if (!$canReceivePayment) {
                 return response()->json([
-                    'message' => 'Invoice ini sudah memiliki pembayaran.',
+                    'message' => 'Invoice tidak bisa menerima pembayaran.',
                     'errors' => [
-                        'payment' => ['Invoice ini sudah memiliki pembayaran.'],
+                        'cart' => ['Invoice tidak bisa menerima pembayaran.'],
                     ],
                 ], 422);
             }
@@ -528,7 +590,7 @@ class PosController extends Controller
                 ], 422);
             }
 
-            if (!$this->isPoCart($cart)) {
+            if (!$isPo) {
                 foreach ($cart->details as $detail) {
                     $stock = $this->getStockSummary(
                         $cart->event_id,
@@ -549,14 +611,35 @@ class PosController extends Controller
                 }
             }
 
+            if ($existingPayment && !$isPo) {
+                return response()->json([
+                    'message' => 'Invoice ini sudah memiliki pembayaran.',
+                    'errors' => [
+                        'payment' => ['Invoice ini sudah memiliki pembayaran.'],
+                    ],
+                ], 422);
+            }
+
+            if ($existingPayment && $existingPayment->payment_status === self::PAYMENT_STATUS_LUNAS) {
+                return response()->json([
+                    'message' => 'Invoice ini sudah lunas.',
+                    'errors' => [
+                        'payment' => ['Invoice ini sudah lunas.'],
+                    ],
+                ], 422);
+            }
+
             $totalAmount = $cart->details->sum(function ($detail) {
                 return (float) ($detail->produkPrice->harga_produk ?? 0) * (int) $detail->qty;
             });
 
-            $paidAmount = (float) $validated['paid_amount'];
-            $changeAmount = $paidAmount - $totalAmount;
+            $inputPaidAmount = (float) $validated['paid_amount'];
+            $requestedPaymentType = $validated['payment_type'] ?? self::PAYMENT_TYPE_LUNAS;
 
-            if ($paidAmount < $totalAmount) {
+            $previousPaidAmount = (float) ($existingPayment?->paid_amount ?? 0);
+            $newPaidAmount = $previousPaidAmount + $inputPaidAmount;
+
+            if (!$isPo && $newPaidAmount < $totalAmount) {
                 return response()->json([
                     'message' => 'Jumlah bayar kurang dari total transaksi.',
                     'errors' => [
@@ -565,15 +648,51 @@ class PosController extends Controller
                 ], 422);
             }
 
-            EventPayment::create([
-                'event_carts_id' => $cart->id,
-                'payment_id' => $validated['payment_id'],
-                'cashier_user_id' => auth()->id(),
-                'total_amount' => $totalAmount,
-                'paid_amount' => $paidAmount,
-                'change_amount' => $changeAmount,
-                'payment_status' => self::STATUS_PAID,
-            ]);
+            if ($isPo && $requestedPaymentType === self::PAYMENT_TYPE_LUNAS && $newPaidAmount < $totalAmount) {
+                return response()->json([
+                    'message' => 'Pembayaran Lunas harus sama dengan atau lebih besar dari total PO.',
+                    'errors' => [
+                        'paid_amount' => ['Pembayaran Lunas harus sama dengan atau lebih besar dari total PO.'],
+                    ],
+                ], 422);
+            }
+
+            $remainingAmount = max($totalAmount - $newPaidAmount, 0);
+            $changeAmount = max($newPaidAmount - $totalAmount, 0);
+
+            $paymentStatus = $remainingAmount > 0
+                ? self::PAYMENT_STATUS_BELUM_LUNAS
+                : self::PAYMENT_STATUS_LUNAS;
+
+            $paymentType = $paymentStatus === self::PAYMENT_STATUS_BELUM_LUNAS
+                ? self::PAYMENT_TYPE_DP
+                : self::PAYMENT_TYPE_LUNAS;
+
+            if ($existingPayment) {
+                $existingPayment->payment_id = $validated['payment_id'];
+                $existingPayment->cashier_user_id = auth()->id();
+                $existingPayment->payment_type = $paymentType;
+                $existingPayment->total_amount = $totalAmount;
+                $existingPayment->paid_amount = $newPaidAmount;
+                $existingPayment->change_amount = $changeAmount;
+                $existingPayment->remaining_amount = $remainingAmount;
+                $existingPayment->payment_status = $paymentStatus;
+                $existingPayment->save();
+            } else {
+                $payment = new EventPayment();
+                $payment->id = (string) Str::uuid();
+                $payment->event_carts_id = $cart->id;
+                $payment->payment_id = $validated['payment_id'];
+                $payment->cashier_user_id = auth()->id();
+                $payment->payment_type = $paymentType;
+                $payment->total_amount = $totalAmount;
+                $payment->paid_amount = $newPaidAmount;
+                $payment->dp_amount = $paymentType === self::PAYMENT_TYPE_DP ? $inputPaidAmount : 0;
+                $payment->change_amount = $changeAmount;
+                $payment->remaining_amount = $remainingAmount;
+                $payment->payment_status = $paymentStatus;
+                $payment->save();
+            }
 
             $cart->update([
                 'status' => self::STATUS_PAID,
@@ -583,7 +702,9 @@ class PosController extends Controller
 
             return response()->json([
                 'success' => true,
-                'message' => 'Pembayaran berhasil disimpan.',
+                'message' => $paymentStatus === self::PAYMENT_STATUS_LUNAS
+                    ? 'Pembayaran berhasil disimpan. Status Lunas.'
+                    : 'Pembayaran DP berhasil disimpan. Status Belum Lunas.',
                 'data' => $loadedCart,
                 'nota' => $loadedCart->nota,
             ]);
@@ -596,8 +717,10 @@ class PosController extends Controller
             ->with([
                 'event:id,nama_event,alamat_event,valid_from,valid_until',
                 'details:id,event_carts_id,produk_price_id,qty',
-                'details.produkPrice:id,produk_id,event_id,harga_produk',
+                'details.produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
                 'details.produkPrice.produk:id,nama_produk,product_number,code_gs1',
+                'details.produkPrice.bundleDetails:id,produk_price_id,produk_id,qty',
+                'details.produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1',
                 'payment',
                 'payment.payment',
                 'payment.cashier:id,name,email',
@@ -624,11 +747,15 @@ class PosController extends Controller
             $detail->stock_masuk = $stock['stock_masuk'];
             $detail->stock_terpakai = $stock['stock_terpakai'];
             $detail->stock_terakhir = $stock['stock_terakhir'];
+            $detail->stock_available_for_line = $stock['stock_available_for_line'];
+            $detail->bundle_components = $stock['bundle_components'] ?? [];
 
             if ($detail->produkPrice) {
                 $detail->produkPrice->stock_masuk = $stock['stock_masuk'];
                 $detail->produkPrice->stock_terpakai = $stock['stock_terpakai'];
                 $detail->produkPrice->stock_terakhir = $stock['stock_terakhir'];
+                $detail->produkPrice->stock_available_for_line = $stock['stock_available_for_line'];
+                $detail->produkPrice->bundle_components = $stock['bundle_components'] ?? [];
             }
 
             return $detail;
@@ -652,20 +779,41 @@ class PosController extends Controller
             ?? '-';
 
         $items = $cart->details->map(function ($detail) {
-            $produk = $detail->produkPrice?->produk;
-            $price = (float) ($detail->price_amount ?? $detail->produkPrice?->harga_produk ?? 0);
+            $produkPrice = $detail->produkPrice;
+            $produk = $produkPrice?->produk;
+            $isBundle = $produkPrice && $this->isBundlePrice($produkPrice);
+
+            $price = (float) ($detail->price_amount ?? $produkPrice?->harga_produk ?? 0);
             $qty = (int) $detail->qty;
             $subtotal = (float) ($detail->subtotal_amount ?? ($price * $qty));
 
+            $bundleDetails = $isBundle
+                ? $produkPrice->bundleDetails->map(function ($bundleDetail) {
+                    return [
+                        'produk_id' => $bundleDetail->produk_id,
+                        'nama_produk' => $bundleDetail->produk?->nama_produk ?? '-',
+                        'product_number' => $bundleDetail->produk?->product_number ?? '-',
+                        'code_gs1' => $bundleDetail->produk?->code_gs1 ?? '-',
+                        'qty' => (int) ($bundleDetail->qty ?? 1),
+                    ];
+                })->values()
+                : collect();
+
             return [
-                'produk_id' => $detail->produkPrice?->produk_id,
+                'produk_id' => $produkPrice?->produk_id,
                 'produk_price_id' => $detail->produk_price_id,
-                'nama_produk' => $produk?->nama_produk ?? '-',
-                'product_number' => $produk?->product_number ?? '-',
-                'code_gs1' => $produk?->code_gs1 ?? '-',
+                'tipe_harga' => $isBundle ? 'bundle' : 'single',
+                'nama_bundle' => $isBundle ? ($produkPrice?->nama_bundle ?? 'Bundle Tanpa Nama') : null,
+                'nama_produk' => $isBundle
+                    ? ($produkPrice?->nama_bundle ?? 'Bundle Tanpa Nama')
+                    : ($produk?->nama_produk ?? '-'),
+                'product_number' => $isBundle ? 'BUNDLE' : ($produk?->product_number ?? '-'),
+                'code_gs1' => $isBundle ? '-' : ($produk?->code_gs1 ?? '-'),
                 'qty' => $qty,
                 'harga' => $price,
                 'subtotal' => $subtotal,
+                'bundle_details' => $bundleDetails,
+                'bundleDetails' => $bundleDetails,
             ];
         })->values();
 
@@ -691,10 +839,13 @@ class PosController extends Controller
             'payment' => [
                 'payment_id' => $payment?->payment_id,
                 'payment_method' => $paymentMethod,
+                'payment_type' => $payment?->payment_type ?? null,
                 'payment_status' => $payment?->payment_status ?? $cart->status,
                 'total_amount' => (float) ($payment?->total_amount ?? $cart->total_amount ?? 0),
                 'paid_amount' => (float) ($payment?->paid_amount ?? 0),
+                'dp_amount' => (float) ($payment?->dp_amount ?? 0),
                 'change_amount' => (float) ($payment?->change_amount ?? 0),
+                'remaining_amount' => (float) ($payment?->remaining_amount ?? 0),
             ],
             'summary' => [
                 'total_qty' => (int) ($cart->total_qty ?? 0),
@@ -704,7 +855,6 @@ class PosController extends Controller
             'printed_at' => now()->format('Y-m-d H:i:s'),
         ];
     }
-
 
     private function getCartType(EventCart $cart): string
     {
@@ -723,15 +873,165 @@ class PosController extends Controller
         string $produkPriceId,
         ?string $excludeDetailId = null
     ): array {
+        $produkPrice = ProdukPrice::query()
+            ->with([
+                'produk:id,nama_produk,product_number,code_gs1',
+                'bundleDetails:id,produk_price_id,produk_id,qty',
+                'bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+            ])
+            ->find($produkPriceId);
+
+        if (!$produkPrice) {
+            return $this->emptyStockSummary();
+        }
+
+        if ($this->isBundlePrice($produkPrice)) {
+            return $this->getBundleStockSummary($eventId, $produkPrice, $excludeDetailId);
+        }
+
+        return $this->getSingleStockSummary($eventId, $produkPrice, $excludeDetailId);
+    }
+
+    private function getSingleStockSummary(
+        string $eventId,
+        ProdukPrice $produkPrice,
+        ?string $excludeDetailId = null
+    ): array {
+        $produkPriceId = $produkPrice->id;
+        $produkId = $produkPrice->produk_id;
+
         $stockMasuk = (int) DB::table('event_inbound')
             ->where('event_id', $eventId)
             ->where('produk_price_id', $produkPriceId)
             ->whereNull('deleted_at')
             ->sum('jumlah_produk');
 
-        $stockTerpakaiTanpaItemIniQuery = DB::table('event_carts_detail as ecd')
+        $stockTerpakaiTanpaItemIni = $this->getSingleStockUsed(
+            $eventId,
+            $produkPriceId,
+            $produkId,
+            $excludeDetailId
+        );
+
+        $stockTerpakaiSemua = $this->getSingleStockUsed(
+            $eventId,
+            $produkPriceId,
+            $produkId
+        );
+
+        $stockTerakhir = max($stockMasuk - $stockTerpakaiSemua, 0);
+
+        return [
+            'stock_masuk' => $stockMasuk,
+            'stock_terpakai' => $stockTerpakaiSemua,
+            'stock_terakhir' => $stockTerakhir,
+            'stock_available_for_line' => max($stockMasuk - $stockTerpakaiTanpaItemIni, 0),
+        ];
+    }
+
+    private function getBundleStockSummary(
+        string $eventId,
+        ProdukPrice $bundlePrice,
+        ?string $excludeDetailId = null
+    ): array {
+        $components = [];
+        $bundleStockMasuk = null;
+        $bundleStockTerakhir = null;
+        $bundleAvailableForLine = null;
+
+        foreach ($bundlePrice->bundleDetails as $bundleDetail) {
+            $componentQty = max((int) ($bundleDetail->qty ?? 1), 1);
+
+            $singleProdukPrice = ProdukPrice::query()
+                ->with('produk:id,nama_produk,product_number,code_gs1')
+                ->where('event_id', $eventId)
+                ->where('produk_id', $bundleDetail->produk_id)
+                ->where(function ($query) {
+                    $query->whereNull('tipe_harga')
+                        ->orWhere('tipe_harga', 'single');
+                })
+                ->first();
+
+            if (!$singleProdukPrice) {
+                $components[] = [
+                    'produk_id' => $bundleDetail->produk_id,
+                    'nama_produk' => $bundleDetail->produk?->nama_produk ?? '-',
+                    'qty_per_bundle' => $componentQty,
+                    'stock_masuk' => 0,
+                    'stock_terpakai' => 0,
+                    'stock_terakhir' => 0,
+                    'stock_available_for_line' => 0,
+                    'message' => 'Harga produk satuan untuk isi bundle belum tersedia pada event ini.',
+                ];
+
+                $bundleStockMasuk = 0;
+                $bundleStockTerakhir = 0;
+                $bundleAvailableForLine = 0;
+
+                continue;
+            }
+
+            $componentStock = $this->getSingleStockSummary(
+                $eventId,
+                $singleProdukPrice,
+                $excludeDetailId
+            );
+
+            $possibleMasuk = intdiv((int) $componentStock['stock_masuk'], $componentQty);
+            $possibleTerakhir = intdiv((int) $componentStock['stock_terakhir'], $componentQty);
+            $possibleAvailable = intdiv((int) $componentStock['stock_available_for_line'], $componentQty);
+
+            $bundleStockMasuk = is_null($bundleStockMasuk)
+                ? $possibleMasuk
+                : min($bundleStockMasuk, $possibleMasuk);
+
+            $bundleStockTerakhir = is_null($bundleStockTerakhir)
+                ? $possibleTerakhir
+                : min($bundleStockTerakhir, $possibleTerakhir);
+
+            $bundleAvailableForLine = is_null($bundleAvailableForLine)
+                ? $possibleAvailable
+                : min($bundleAvailableForLine, $possibleAvailable);
+
+            $components[] = [
+                'produk_id' => $bundleDetail->produk_id,
+                'produk_price_id' => $singleProdukPrice->id,
+                'nama_produk' => $bundleDetail->produk?->nama_produk ?? $singleProdukPrice->produk?->nama_produk ?? '-',
+                'product_number' => $bundleDetail->produk?->product_number ?? $singleProdukPrice->produk?->product_number ?? '-',
+                'code_gs1' => $bundleDetail->produk?->code_gs1 ?? $singleProdukPrice->produk?->code_gs1 ?? '-',
+                'qty_per_bundle' => $componentQty,
+                'stock_masuk' => $componentStock['stock_masuk'],
+                'stock_terpakai' => $componentStock['stock_terpakai'],
+                'stock_terakhir' => $componentStock['stock_terakhir'],
+                'stock_available_for_line' => $componentStock['stock_available_for_line'],
+                'bundle_stock_masuk' => $possibleMasuk,
+                'bundle_stock_terakhir' => $possibleTerakhir,
+                'bundle_stock_available_for_line' => $possibleAvailable,
+            ];
+        }
+
+        $stockMasuk = (int) ($bundleStockMasuk ?? 0);
+        $stockTerakhir = (int) ($bundleStockTerakhir ?? 0);
+        $stockAvailableForLine = (int) ($bundleAvailableForLine ?? 0);
+
+        return [
+            'stock_masuk' => $stockMasuk,
+            'stock_terpakai' => max($stockMasuk - $stockTerakhir, 0),
+            'stock_terakhir' => $stockTerakhir,
+            'stock_available_for_line' => $stockAvailableForLine,
+            'bundle_components' => $components,
+        ];
+    }
+
+    private function getSingleStockUsed(
+        string $eventId,
+        string $singleProdukPriceId,
+        ?string $produkId = null,
+        ?string $excludeDetailId = null
+    ): int {
+        $directUsageQuery = DB::table('event_carts_detail as ecd')
             ->join('event_carts as ec', 'ec.id', '=', 'ecd.event_carts_id')
-            ->where('ecd.produk_price_id', $produkPriceId)
+            ->where('ecd.produk_price_id', $singleProdukPriceId)
             ->where('ec.event_id', $eventId)
             ->whereIn('ec.status', [
                 self::STATUS_DRAFT,
@@ -745,35 +1045,147 @@ class PosController extends Controller
             ->whereNull('ec.deleted_at');
 
         if ($excludeDetailId) {
-            $stockTerpakaiTanpaItemIniQuery->where('ecd.id', '!=', $excludeDetailId);
+            $directUsageQuery->where('ecd.id', '!=', $excludeDetailId);
         }
 
-        $stockTerpakaiTanpaItemIni = (int) $stockTerpakaiTanpaItemIniQuery->sum('ecd.qty');
+        $directUsage = (int) $directUsageQuery->sum('ecd.qty');
 
-        $stockTerpakaiSemua = (int) DB::table('event_carts_detail as ecd')
-            ->join('event_carts as ec', 'ec.id', '=', 'ecd.event_carts_id')
-            ->where('ecd.produk_price_id', $produkPriceId)
-            ->where('ec.event_id', $eventId)
-            ->whereIn('ec.status', [
-                self::STATUS_DRAFT,
-                self::STATUS_PAID,
-            ])
-            ->where(function ($query) {
-                $query->whereNull('ec.transaction_type')
-                    ->orWhere('ec.transaction_type', self::CART_TYPE_PEMBELIAN);
+        $bundleUsage = 0;
+
+        if ($produkId) {
+            $bundleUsageQuery = DB::table('event_carts_detail as ecd')
+                ->join('event_carts as ec', 'ec.id', '=', 'ecd.event_carts_id')
+                ->join('produk_price as pp', 'pp.id', '=', 'ecd.produk_price_id')
+                ->join('produk_price_details as ppd', 'ppd.produk_price_id', '=', 'pp.id')
+                ->where('ec.event_id', $eventId)
+                ->where('ppd.produk_id', $produkId)
+                ->where('pp.tipe_harga', 'bundle')
+                ->whereIn('ec.status', [
+                    self::STATUS_DRAFT,
+                    self::STATUS_PAID,
+                ])
+                ->where(function ($query) {
+                    $query->whereNull('ec.transaction_type')
+                        ->orWhere('ec.transaction_type', self::CART_TYPE_PEMBELIAN);
+                })
+                ->whereNull('ecd.deleted_at')
+                ->whereNull('ec.deleted_at')
+                ->whereNull('pp.deleted_at')
+                ->whereNull('ppd.deleted_at');
+
+            if ($excludeDetailId) {
+                $bundleUsageQuery->where('ecd.id', '!=', $excludeDetailId);
+            }
+
+            $bundleUsage = (int) $bundleUsageQuery->sum(DB::raw('ecd.qty * ppd.qty'));
+        }
+
+        return $directUsage + $bundleUsage;
+    }
+
+    private function emptyStockSummary(): array
+    {
+        return [
+            'stock_masuk' => 0,
+            'stock_terpakai' => 0,
+            'stock_terakhir' => 0,
+            'stock_available_for_line' => 0,
+        ];
+    }
+
+    private function isBundlePrice(ProdukPrice $produkPrice): bool
+    {
+        return ($produkPrice->tipe_harga ?? null) === 'bundle';
+    }
+
+    private function formatProdukPriceOption(ProdukPrice $produkPrice): array
+    {
+        $produk = $produkPrice->produk;
+
+        $tipeHarga = $produkPrice->tipe_harga
+            ?: ($produkPrice->nama_bundle ? 'bundle' : 'single');
+
+        $isBundle = $tipeHarga === 'bundle';
+
+        $namaProduk = $isBundle
+            ? ($produkPrice->nama_bundle ?: 'Bundle Tanpa Nama')
+            : ($produk?->nama_produk ?? '-');
+
+        $productNumber = $isBundle
+            ? 'BUNDLE'
+            : ($produk?->product_number ?? '-');
+
+        $codeGs1 = $isBundle
+            ? ''
+            : ($produk?->code_gs1 ?? '-');
+
+        $bundleDetails = $produkPrice->bundleDetails
+            ->map(function ($detail) {
+                return [
+                    'id' => $detail->id,
+                    'produk_price_id' => $detail->produk_price_id,
+                    'produk_id' => $detail->produk_id,
+                    'qty' => (int) ($detail->qty ?? 1),
+                    'produk' => [
+                        'id' => $detail->produk?->id,
+                        'nama_produk' => $detail->produk?->nama_produk ?? '-',
+                        'product_number' => $detail->produk?->product_number ?? '-',
+                        'code_gs1' => $detail->produk?->code_gs1 ?? '-',
+                    ],
+                ];
             })
-            ->whereNull('ecd.deleted_at')
-            ->whereNull('ec.deleted_at')
-            ->sum('ecd.qty');
-
-        $stockTerakhir = max($stockMasuk - $stockTerpakaiSemua, 0);
+            ->values();
 
         return [
-            'stock_masuk' => $stockMasuk,
-            'stock_terpakai' => $stockTerpakaiSemua,
-            'stock_terakhir' => $stockTerakhir,
-            'stock_available_for_line' => max($stockMasuk - $stockTerpakaiTanpaItemIni, 0),
+            'id' => $produkPrice->id,
+            'produk_price_id' => $produkPrice->id,
+            'product_price_id' => $produkPrice->id,
+
+            'produk_id' => $produkPrice->produk_id,
+            'event_id' => $produkPrice->event_id,
+
+            'tipe_harga' => $tipeHarga,
+            'nama_bundle' => $isBundle ? $produkPrice->nama_bundle : null,
+
+            'harga_produk' => (float) ($produkPrice->harga_produk ?? 0),
+            'price' => (float) ($produkPrice->harga_produk ?? 0),
+
+            'nama_produk' => $namaProduk,
+            'product_name' => $namaProduk,
+            'product_number' => $productNumber,
+            'code_gs1' => $codeGs1,
+
+            'produk' => $isBundle
+                ? null
+                : [
+                    'id' => $produk?->id,
+                    'nama_produk' => $produk?->nama_produk ?? '-',
+                    'product_number' => $produk?->product_number ?? '-',
+                    'code_gs1' => $produk?->code_gs1 ?? '-',
+                ],
+
+            'bundle_details' => $bundleDetails,
+            'bundleDetails' => $bundleDetails,
         ];
+    }
+
+    private function ensureActiveEvent(string $eventId): void
+    {
+        $isActive = DataEvent::query()
+            ->where('id', $eventId)
+            ->whereDate('valid_until', '>=', now()->toDateString())
+            ->exists();
+
+        if (!$isActive) {
+            abort(response()->json([
+                'message' => 'Event sudah terlewat dan tidak bisa digunakan untuk transaksi POS.',
+                'errors' => [
+                    'event_id' => [
+                        'Event sudah terlewat dan tidak bisa digunakan untuk transaksi POS.',
+                    ],
+                ],
+            ], 422));
+        }
     }
 
     private function autoVoidExpiredDraftCarts(): void

@@ -1,10 +1,19 @@
 import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import ReactSelect from "react-select";
 
 const initialForm = {
+    tipe_harga: "single",
     produk_id: "",
     event_id: "",
+    nama_bundle: "",
     harga_produk: "",
+    items: [
+        {
+            produk_id: "",
+            qty: 1,
+        },
+    ],
 };
 
 export default function ProdukPriceIndexPage() {
@@ -35,6 +44,42 @@ export default function ProdukPriceIndexPage() {
     const [success, setSuccess] = useState("");
 
     const isEdit = useMemo(() => Boolean(editingId), [editingId]);
+    const isBundle = form.tipe_harga === "bundle";
+    const isSingle = form.tipe_harga === "single";
+
+    const produkSelectOptions = useMemo(() => {
+        return produkOptions.map((item) => ({
+            value: item.id,
+            label: `${item.nama_produk || "-"}${
+                item.product_number ? ` - ${item.product_number}` : ""
+            }${item.code_gs1 ? ` - ${item.code_gs1}` : ""}`,
+            raw: item,
+        }));
+    }, [produkOptions]);
+
+    const eventSelectOptions = useMemo(() => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        return eventOptions
+            .filter((item) => {
+                if (!item.valid_until) {
+                    return false;
+                }
+
+                const validUntil = new Date(item.valid_until);
+                validUntil.setHours(0, 0, 0, 0);
+
+                return validUntil >= today;
+            })
+            .map((item) => ({
+                value: item.id,
+                label: `${item.nama_event || "-"} - ${formatDate(
+                    item.valid_from
+                )} s/d ${formatDate(item.valid_until)}`,
+                raw: item,
+            }));
+    }, [eventOptions]);
 
     useEffect(() => {
         fetchOptions();
@@ -118,11 +163,32 @@ export default function ProdukPriceIndexPage() {
     const openEditModal = async (row) => {
         await fetchOptions();
 
+        const tipeHarga = row.tipe_harga || (row.nama_bundle ? "bundle" : "single");
+
         setEditingId(row.id);
         setForm({
+            tipe_harga: tipeHarga,
             produk_id: row.produk_id || "",
             event_id: row.event_id || "",
+            nama_bundle: row.nama_bundle || "",
             harga_produk: row.harga_produk || "",
+            items:
+                Array.isArray(row.bundle_details) && row.bundle_details.length > 0
+                    ? row.bundle_details.map((detail) => ({
+                          produk_id: detail.produk_id || detail.produk?.id || "",
+                          qty: detail.qty || 1,
+                      }))
+                    : Array.isArray(row.bundleDetails) && row.bundleDetails.length > 0
+                    ? row.bundleDetails.map((detail) => ({
+                          produk_id: detail.produk_id || detail.produk?.id || "",
+                          qty: detail.qty || 1,
+                      }))
+                    : [
+                          {
+                              produk_id: "",
+                              qty: 1,
+                          },
+                      ],
         });
 
         setError("");
@@ -137,10 +203,90 @@ export default function ProdukPriceIndexPage() {
     const handleChange = (e) => {
         const { name, value } = e.target;
 
+        setForm((prev) => {
+            if (name === "tipe_harga") {
+                return {
+                    ...prev,
+                    tipe_harga: value,
+                    produk_id: value === "bundle" ? "" : prev.produk_id,
+                    nama_bundle: value === "single" ? "" : prev.nama_bundle,
+                    items:
+                        value === "bundle"
+                            ? prev.items?.length
+                                ? prev.items
+                                : [{ produk_id: "", qty: 1 }]
+                            : [{ produk_id: "", qty: 1 }],
+                };
+            }
+
+            return {
+                ...prev,
+                [name]: value,
+            };
+        });
+    };
+
+    const handleSelectChange = (name, selectedOption) => {
         setForm((prev) => ({
             ...prev,
-            [name]: value,
+            [name]: selectedOption?.value || "",
         }));
+    };
+
+    const handleBundleItemChange = (index, field, value) => {
+        setForm((prev) => {
+            const nextItems = [...prev.items];
+
+            nextItems[index] = {
+                ...nextItems[index],
+                [field]: field === "qty" ? Number(value || 1) : value,
+            };
+
+            return {
+                ...prev,
+                items: nextItems,
+            };
+        });
+    };
+
+    const handleBundleItemSelectChange = (index, selectedOption) => {
+        setForm((prev) => {
+            const nextItems = [...prev.items];
+
+            nextItems[index] = {
+                ...nextItems[index],
+                produk_id: selectedOption?.value || "",
+            };
+
+            return {
+                ...prev,
+                items: nextItems,
+            };
+        });
+    };
+
+    const addBundleItem = () => {
+        setForm((prev) => ({
+            ...prev,
+            items: [
+                ...prev.items,
+                {
+                    produk_id: "",
+                    qty: 1,
+                },
+            ],
+        }));
+    };
+
+    const removeBundleItem = (index) => {
+        setForm((prev) => {
+            const nextItems = prev.items.filter((_, itemIndex) => itemIndex !== index);
+
+            return {
+                ...prev,
+                items: nextItems.length > 0 ? nextItems : [{ produk_id: "", qty: 1 }],
+            };
+        });
     };
 
     const getValidationMessage = (err) => {
@@ -160,17 +306,72 @@ export default function ProdukPriceIndexPage() {
         return "Terjadi kesalahan. Silakan coba lagi.";
     };
 
+    const validateBeforeSubmit = () => {
+        if (!form.event_id) {
+            return "Event wajib dipilih.";
+        }
+
+        if (!form.harga_produk || Number(form.harga_produk) < 0) {
+            return "Harga wajib diisi dan tidak boleh kurang dari 0.";
+        }
+
+        if (isSingle && !form.produk_id) {
+            return "Produk wajib dipilih untuk harga single.";
+        }
+
+        if (isBundle) {
+            if (!String(form.nama_bundle || "").trim()) {
+                return "Nama bundle wajib diisi.";
+            }
+
+            const validItems = form.items.filter(
+                (item) => item.produk_id && Number(item.qty || 0) > 0
+            );
+
+            if (validItems.length === 0) {
+                return "Isi bundle minimal 1 produk.";
+            }
+
+            const duplicateProduk = validItems
+                .map((item) => item.produk_id)
+                .filter((produkId, index, array) => array.indexOf(produkId) !== index);
+
+            if (duplicateProduk.length > 0) {
+                return "Produk di dalam bundle tidak boleh duplikat.";
+            }
+        }
+
+        return "";
+    };
+
     const handleSubmit = async (e) => {
         e.preventDefault();
+
+        const validationMessage = validateBeforeSubmit();
+
+        if (validationMessage) {
+            setError(validationMessage);
+            return;
+        }
 
         setSaving(true);
         setError("");
         setSuccess("");
 
         const payload = {
-            produk_id: form.produk_id,
+            tipe_harga: form.tipe_harga,
             event_id: form.event_id,
             harga_produk: form.harga_produk,
+            produk_id: isSingle ? form.produk_id : null,
+            nama_bundle: isBundle ? form.nama_bundle : null,
+            items: isBundle
+                ? form.items
+                      .filter((item) => item.produk_id && Number(item.qty || 0) > 0)
+                      .map((item) => ({
+                          produk_id: item.produk_id,
+                          qty: Number(item.qty || 1),
+                      }))
+                : [],
         };
 
         try {
@@ -193,10 +394,10 @@ export default function ProdukPriceIndexPage() {
     };
 
     const handleDelete = async (row) => {
+        const label = getRowName(row);
+
         const confirmed = window.confirm(
-            `Hapus harga produk "${row.produk?.nama_produk || "-"}" untuk event "${
-                row.event?.nama_event || "-"
-            }"?`
+            `Hapus harga "${label}" untuk event "${row.event?.nama_event || "-"}"?`
         );
 
         if (!confirmed) return;
@@ -246,8 +447,7 @@ export default function ProdukPriceIndexPage() {
                             </h1>
 
                             <p className="mt-2 max-w-3xl text-sm font-semibold leading-6 text-slate-500">
-                                Kelola harga produk berdasarkan event yang sedang
-                                berjalan.
+                                Kelola harga produk berdasarkan event, termasuk harga single produk dan bundle.
                             </p>
                         </div>
                     </div>
@@ -284,7 +484,7 @@ export default function ProdukPriceIndexPage() {
                             </h2>
 
                             <p className="mt-1 text-sm font-semibold text-slate-500">
-                                Menampilkan harga produk per event.
+                                Menampilkan harga single produk dan bundle per event.
                             </p>
                         </div>
 
@@ -292,7 +492,7 @@ export default function ProdukPriceIndexPage() {
                             type="text"
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
-                            placeholder="Cari produk atau event..."
+                            placeholder="Cari produk, bundle, atau event..."
                             className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm font-semibold text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-slate-950 focus:bg-white sm:w-80"
                         />
                     </div>
@@ -308,9 +508,11 @@ export default function ProdukPriceIndexPage() {
                                 <thead>
                                     <tr className="border-b border-slate-200 bg-slate-50 text-slate-500">
                                         <TableHead>No</TableHead>
-                                        <TableHead>Produk</TableHead>
+                                        <TableHead>Nama / Produk</TableHead>
+                                        <TableHead>Tipe</TableHead>
                                         <TableHead>Event</TableHead>
                                         <TableHead>Periode Event</TableHead>
+                                        <TableHead>Isi Bundle</TableHead>
                                         <TableHead>Harga</TableHead>
                                         <TableHead>Tanggal Dibuat</TableHead>
                                         <TableHead align="right">Aksi</TableHead>
@@ -319,12 +521,12 @@ export default function ProdukPriceIndexPage() {
 
                                 <tbody className="divide-y divide-slate-100 bg-white">
                                     {loading ? (
-                                        <LoadingRows colSpan={7} />
+                                        <LoadingRows colSpan={9} />
                                     ) : rows.length === 0 ? (
                                         <EmptyRow
-                                            colSpan={7}
+                                            colSpan={9}
                                             title="Data produk price belum tersedia"
-                                            description="Tambahkan harga produk per event."
+                                            description="Tambahkan harga single produk atau bundle per event."
                                             buttonText="Tambah Harga"
                                             onClick={openCreateModal}
                                         />
@@ -336,6 +538,9 @@ export default function ProdukPriceIndexPage() {
                                                 index +
                                                 1;
 
+                                            const tipeHarga = getRowType(row);
+                                            const bundleDetails = getBundleDetails(row);
+
                                             return (
                                                 <tr
                                                     key={row.id}
@@ -345,13 +550,20 @@ export default function ProdukPriceIndexPage() {
                                                         {number}
                                                     </td>
 
-                                                    <td className="min-w-[260px] px-5 py-4">
+                                                    <td className="min-w-[280px] px-5 py-4">
                                                         <div className="font-black text-slate-950">
-                                                            {row.produk?.nama_produk || "-"}
+                                                            {getRowName(row)}
                                                         </div>
+
                                                         <div className="mt-0.5 text-xs font-semibold text-slate-400">
-                                                            {row.produk?.product_number || "-"}
+                                                            {tipeHarga === "bundle"
+                                                                ? row.nama_bundle || "-"
+                                                                : row.produk?.product_number || "-"}
                                                         </div>
+                                                    </td>
+
+                                                    <td className="whitespace-nowrap px-5 py-4">
+                                                        <TypeBadge type={tipeHarga} />
                                                     </td>
 
                                                     <td className="min-w-[220px] px-5 py-4">
@@ -367,6 +579,42 @@ export default function ProdukPriceIndexPage() {
                                                         {formatDate(row.event?.valid_from)} -{" "}
                                                         {formatDate(row.event?.valid_until)}
                                                     </TableCell>
+
+                                                    <td className="min-w-[260px] px-5 py-4">
+                                                        {tipeHarga === "bundle" ? (
+                                                            bundleDetails.length > 0 ? (
+                                                                <div className="space-y-1">
+                                                                    {bundleDetails
+                                                                        .slice(0, 4)
+                                                                        .map((detail, detailIndex) => (
+                                                                            <div
+                                                                                key={detail.id || detailIndex}
+                                                                                className="text-xs font-bold text-slate-500"
+                                                                            >
+                                                                                {detail.produk?.nama_produk || "-"}{" "}
+                                                                                <span className="font-black text-slate-950">
+                                                                                    x{detail.qty || 1}
+                                                                                </span>
+                                                                            </div>
+                                                                        ))}
+
+                                                                    {bundleDetails.length > 4 && (
+                                                                        <div className="text-xs font-black text-slate-400">
+                                                                            +{bundleDetails.length - 4} produk lain
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            ) : (
+                                                                <span className="text-sm font-semibold text-slate-400">
+                                                                    Belum ada item
+                                                                </span>
+                                                            )
+                                                        ) : (
+                                                            <span className="text-sm font-semibold text-slate-400">
+                                                                -
+                                                            </span>
+                                                        )}
+                                                    </td>
 
                                                     <TableCell>
                                                         {formatRupiah(row.harga_produk)}
@@ -420,15 +668,22 @@ export default function ProdukPriceIndexPage() {
                 <ProdukPriceModal
                     isEdit={isEdit}
                     form={form}
-                    produkOptions={produkOptions}
-                    eventOptions={eventOptions}
+                    produkSelectOptions={produkSelectOptions}
+                    eventSelectOptions={eventSelectOptions}
                     optionLoading={optionLoading}
                     error={error}
                     saving={saving}
+                    isBundle={isBundle}
+                    isSingle={isSingle}
                     onClose={closeModal}
                     onChange={handleChange}
+                    onSelectChange={handleSelectChange}
                     onSubmit={handleSubmit}
                     onReloadOptions={fetchOptions}
+                    onBundleItemChange={handleBundleItemChange}
+                    onBundleItemSelectChange={handleBundleItemSelectChange}
+                    onAddBundleItem={addBundleItem}
+                    onRemoveBundleItem={removeBundleItem}
                 />
             )}
         </div>
@@ -438,22 +693,35 @@ export default function ProdukPriceIndexPage() {
 function ProdukPriceModal({
     isEdit,
     form,
-    produkOptions,
-    eventOptions,
+    produkSelectOptions,
+    eventSelectOptions,
     optionLoading,
     error,
     saving,
+    isBundle,
+    isSingle,
     onClose,
     onChange,
+    onSelectChange,
     onSubmit,
     onReloadOptions,
+    onBundleItemChange,
+    onBundleItemSelectChange,
+    onAddBundleItem,
+    onRemoveBundleItem,
 }) {
-    const hasProduk = produkOptions.length > 0;
-    const hasEvent = eventOptions.length > 0;
+    const hasProduk = produkSelectOptions.length > 0;
+    const hasEvent = eventSelectOptions.length > 0;
+
+    const selectedEvent =
+        eventSelectOptions.find((item) => item.value === form.event_id) || null;
+
+    const selectedProduk =
+        produkSelectOptions.find((item) => item.value === form.produk_id) || null;
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
-            <div className="w-full max-w-xl overflow-hidden rounded-[1.5rem] bg-white shadow-2xl">
+            <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-[1.5rem] bg-white shadow-2xl">
                 <div className="border-b border-slate-100 p-6">
                     <div className="flex items-start justify-between gap-4">
                         <div>
@@ -466,7 +734,7 @@ function ProdukPriceModal({
                             </h3>
 
                             <p className="mt-1 text-sm font-semibold text-slate-500">
-                                Pilih produk dan event lalu isi harga.
+                                Pilih tipe harga single produk atau bundle.
                             </p>
                         </div>
 
@@ -499,45 +767,69 @@ function ProdukPriceModal({
 
                     <form onSubmit={onSubmit} className="space-y-5">
                         <div>
-                            <div className="mb-2 flex items-center justify-between gap-3">
-                                <label className="block text-sm font-black text-slate-700">
-                                    Produk <span className="text-red-500">*</span>
+                            <label className="mb-2 block text-sm font-black text-slate-700">
+                                Tipe Harga <span className="text-red-500">*</span>
+                            </label>
+
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                <label
+                                    className={`cursor-pointer rounded-2xl border p-4 transition ${
+                                        isSingle
+                                            ? "border-slate-950 bg-slate-950 text-white"
+                                            : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+                                    }`}
+                                >
+                                    <input
+                                        type="radio"
+                                        name="tipe_harga"
+                                        value="single"
+                                        checked={isSingle}
+                                        onChange={onChange}
+                                        disabled={saving}
+                                        className="sr-only"
+                                    />
+
+                                    <div className="text-sm font-black">
+                                        Single Produk
+                                    </div>
+                                    <div
+                                        className={`mt-1 text-xs font-semibold ${
+                                            isSingle ? "text-slate-300" : "text-slate-400"
+                                        }`}
+                                    >
+                                        1 produk memiliki 1 harga event.
+                                    </div>
                                 </label>
 
-                                <button
-                                    type="button"
-                                    onClick={onReloadOptions}
-                                    disabled={saving || optionLoading}
-                                    className="text-xs font-black text-slate-500 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
+                                <label
+                                    className={`cursor-pointer rounded-2xl border p-4 transition ${
+                                        isBundle
+                                            ? "border-slate-950 bg-slate-950 text-white"
+                                            : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+                                    }`}
                                 >
-                                    {optionLoading ? "Memuat..." : "Reload"}
-                                </button>
+                                    <input
+                                        type="radio"
+                                        name="tipe_harga"
+                                        value="bundle"
+                                        checked={isBundle}
+                                        onChange={onChange}
+                                        disabled={saving}
+                                        className="sr-only"
+                                    />
+
+                                    <div className="text-sm font-black">
+                                        Bundle Produk
+                                    </div>
+                                    <div
+                                        className={`mt-1 text-xs font-semibold ${
+                                            isBundle ? "text-slate-300" : "text-slate-400"
+                                        }`}
+                                    >
+                                        Beberapa produk menjadi 1 harga paket.
+                                    </div>
+                                </label>
                             </div>
-
-                            <select
-                                name="produk_id"
-                                value={form.produk_id}
-                                onChange={onChange}
-                                disabled={saving || optionLoading || !hasProduk}
-                                className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm font-semibold text-slate-700 outline-none transition focus:border-slate-950 focus:bg-white disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                                <option value="">
-                                    {optionLoading
-                                        ? "Memuat produk..."
-                                        : hasProduk
-                                        ? "Pilih Produk"
-                                        : "Produk belum tersedia"}
-                                </option>
-
-                                {produkOptions.map((item) => (
-                                    <option key={item.id} value={item.id}>
-                                        {item.nama_produk}
-                                        {item.product_number
-                                            ? ` - ${item.product_number}`
-                                            : ""}
-                                    </option>
-                                ))}
-                            </select>
                         </div>
 
                         <div>
@@ -545,32 +837,172 @@ function ProdukPriceModal({
                                 Event <span className="text-red-500">*</span>
                             </label>
 
-                            <select
-                                name="event_id"
-                                value={form.event_id}
-                                onChange={onChange}
-                                disabled={saving || optionLoading || !hasEvent}
-                                className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm font-semibold text-slate-700 outline-none transition focus:border-slate-950 focus:bg-white disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                                <option value="">
-                                    {optionLoading
+                            <Select2
+                                value={selectedEvent}
+                                options={eventSelectOptions}
+                                onChange={(selected) =>
+                                    onSelectChange("event_id", selected)
+                                }
+                                placeholder={
+                                    optionLoading
                                         ? "Memuat event..."
                                         : hasEvent
                                         ? "Pilih Event"
-                                        : "Event belum tersedia"}
-                                </option>
-
-                                {eventOptions.map((item) => (
-                                    <option key={item.id} value={item.id}>
-                                        {item.nama_event} - {formatDate(item.valid_from)} s/d{" "}
-                                        {formatDate(item.valid_until)}
-                                    </option>
-                                ))}
-                            </select>
+                                        : "Event belum tersedia"
+                                }
+                                disabled={saving || optionLoading || !hasEvent}
+                            />
                         </div>
 
+                        {isSingle && (
+                            <div>
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                    <label className="block text-sm font-black text-slate-700">
+                                        Produk <span className="text-red-500">*</span>
+                                    </label>
+
+                                    <button
+                                        type="button"
+                                        onClick={onReloadOptions}
+                                        disabled={saving || optionLoading}
+                                        className="text-xs font-black text-slate-500 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
+                                    >
+                                        {optionLoading ? "Memuat..." : "Reload"}
+                                    </button>
+                                </div>
+
+                                <Select2
+                                    value={selectedProduk}
+                                    options={produkSelectOptions}
+                                    onChange={(selected) =>
+                                        onSelectChange("produk_id", selected)
+                                    }
+                                    placeholder={
+                                        optionLoading
+                                            ? "Memuat produk..."
+                                            : hasProduk
+                                            ? "Pilih Produk"
+                                            : "Produk belum tersedia"
+                                    }
+                                    disabled={saving || optionLoading || !hasProduk}
+                                />
+                            </div>
+                        )}
+
+                        {isBundle && (
+                            <>
+                                <Input
+                                    label="Nama Bundle"
+                                    name="nama_bundle"
+                                    value={form.nama_bundle}
+                                    onChange={onChange}
+                                    placeholder="Contoh: Paket Skincare Hemat"
+                                    disabled={saving}
+                                    required
+                                />
+
+                                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                                    <div className="mb-4 flex items-center justify-between gap-3">
+                                        <div>
+                                            <h4 className="text-sm font-black text-slate-950">
+                                                Isi Bundle
+                                            </h4>
+                                            <p className="mt-1 text-xs font-semibold text-slate-500">
+                                                Tambahkan produk yang masuk ke dalam paket bundle.
+                                            </p>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={onAddBundleItem}
+                                            disabled={saving || optionLoading || !hasProduk}
+                                            className="rounded-xl bg-slate-950 px-4 py-2 text-xs font-black text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                            Tambah Item
+                                        </button>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                        {form.items.map((item, index) => {
+                                            const selectedBundleProduk =
+                                                produkSelectOptions.find(
+                                                    (produk) =>
+                                                        produk.value === item.produk_id
+                                                ) || null;
+
+                                            return (
+                                                <div
+                                                    key={index}
+                                                    className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-3 md:grid-cols-[minmax(0,1fr)_120px_auto] md:items-end"
+                                                >
+                                                    <div>
+                                                        <label className="mb-2 block text-xs font-black uppercase tracking-wide text-slate-500">
+                                                            Produk
+                                                        </label>
+
+                                                        <Select2
+                                                            value={selectedBundleProduk}
+                                                            options={produkSelectOptions}
+                                                            onChange={(selected) =>
+                                                                onBundleItemSelectChange(
+                                                                    index,
+                                                                    selected
+                                                                )
+                                                            }
+                                                            placeholder={
+                                                                optionLoading
+                                                                    ? "Memuat produk..."
+                                                                    : hasProduk
+                                                                    ? "Pilih Produk"
+                                                                    : "Produk belum tersedia"
+                                                            }
+                                                            disabled={
+                                                                saving ||
+                                                                optionLoading ||
+                                                                !hasProduk
+                                                            }
+                                                        />
+                                                    </div>
+
+                                                    <Input
+                                                        label="Qty"
+                                                        type="number"
+                                                        min="1"
+                                                        value={item.qty}
+                                                        onChange={(e) =>
+                                                            onBundleItemChange(
+                                                                index,
+                                                                "qty",
+                                                                e.target.value
+                                                            )
+                                                        }
+                                                        disabled={saving}
+                                                        required
+                                                    />
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            onRemoveBundleItem(index)
+                                                        }
+                                                        disabled={
+                                                            saving ||
+                                                            form.items.length <= 1
+                                                        }
+                                                        className="h-12 rounded-2xl bg-red-50 px-4 text-xs font-black text-red-700 ring-1 ring-red-100 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        Hapus
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            </>
+                        )}
+
                         <Input
-                            label="Harga Produk"
+                            label={isBundle ? "Harga Bundle" : "Harga Produk"}
                             name="harga_produk"
                             type="number"
                             value={form.harga_produk}
@@ -611,6 +1043,107 @@ function ProdukPriceModal({
                 </div>
             </div>
         </div>
+    );
+}
+
+function Select2({
+    value,
+    options,
+    onChange,
+    placeholder = "Pilih data",
+    disabled = false,
+}) {
+    return (
+        <ReactSelect
+            value={value}
+            options={options}
+            onChange={onChange}
+            isDisabled={disabled}
+            isClearable
+            isSearchable
+            placeholder={placeholder}
+            noOptionsMessage={() => "Data tidak ditemukan"}
+            classNamePrefix="react-select"
+            styles={{
+                control: (base, state) => ({
+                    ...base,
+                    minHeight: 48,
+                    borderRadius: 16,
+                    borderColor: state.isFocused ? "#020617" : "#e2e8f0",
+                    backgroundColor: disabled ? "#f1f5f9" : "#f8fafc",
+                    boxShadow: "none",
+                    paddingLeft: 4,
+                    paddingRight: 4,
+                    fontSize: 14,
+                    fontWeight: 700,
+                    color: "#334155",
+                    ":hover": {
+                        borderColor: state.isFocused ? "#020617" : "#cbd5e1",
+                    },
+                }),
+                valueContainer: (base) => ({
+                    ...base,
+                    padding: "0 10px",
+                }),
+                placeholder: (base) => ({
+                    ...base,
+                    color: "#94a3b8",
+                    fontWeight: 700,
+                }),
+                singleValue: (base) => ({
+                    ...base,
+                    color: "#0f172a",
+                    fontWeight: 800,
+                }),
+                menu: (base) => ({
+                    ...base,
+                    zIndex: 9999,
+                    borderRadius: 16,
+                    overflow: "hidden",
+                    border: "1px solid #e2e8f0",
+                    boxShadow:
+                        "0 20px 25px -5px rgb(15 23 42 / 0.12), 0 8px 10px -6px rgb(15 23 42 / 0.12)",
+                }),
+                menuPortal: (base) => ({
+                    ...base,
+                    zIndex: 9999,
+                }),
+                option: (base, state) => ({
+                    ...base,
+                    fontSize: 14,
+                    fontWeight: state.isSelected ? 900 : 700,
+                    backgroundColor: state.isSelected
+                        ? "#020617"
+                        : state.isFocused
+                        ? "#f1f5f9"
+                        : "#ffffff",
+                    color: state.isSelected ? "#ffffff" : "#334155",
+                    cursor: "pointer",
+                }),
+                indicatorSeparator: () => ({
+                    display: "none",
+                }),
+            }}
+            menuPortalTarget={
+                typeof document !== "undefined" ? document.body : null
+            }
+        />
+    );
+}
+
+function TypeBadge({ type }) {
+    const isBundle = type === "bundle";
+
+    return (
+        <span
+            className={`inline-flex rounded-full px-3 py-1 text-xs font-black ${
+                isBundle
+                    ? "bg-blue-50 text-blue-700 ring-1 ring-blue-100"
+                    : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
+            }`}
+        >
+            {isBundle ? "Bundle" : "Single"}
+        </span>
     );
 }
 
@@ -760,6 +1293,50 @@ function PaginationInfo({
             </div>
         </div>
     );
+}
+
+function getRowType(row) {
+    return row.tipe_harga || (row.nama_bundle ? "bundle" : "single");
+}
+
+function getRowName(row) {
+    const type = getRowType(row);
+
+    if (type === "bundle") {
+        return row.nama_bundle || row.display_name || "Bundle Tanpa Nama";
+    }
+
+    return row.produk?.nama_produk || row.display_name || "-";
+}
+
+function getBundleDetails(row) {
+    if (Array.isArray(row.bundle_details)) {
+        return row.bundle_details;
+    }
+
+    if (Array.isArray(row.bundleDetails)) {
+        return row.bundleDetails;
+    }
+
+    if (Array.isArray(row.bundle_products)) {
+        return row.bundle_products.map((produk) => ({
+            id: produk.id,
+            produk,
+            produk_id: produk.id,
+            qty: produk.pivot?.qty || 1,
+        }));
+    }
+
+    if (Array.isArray(row.bundleProducts)) {
+        return row.bundleProducts.map((produk) => ({
+            id: produk.id,
+            produk,
+            produk_id: produk.id,
+            qty: produk.pivot?.qty || 1,
+        }));
+    }
+
+    return [];
 }
 
 function formatRupiah(value) {

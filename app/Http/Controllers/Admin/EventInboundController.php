@@ -28,26 +28,35 @@ class EventInboundController extends Controller
             ->with([
                 'supplier:id,nama_supplier,contact_supplier',
                 'event:id,nama_event,alamat_event,valid_from,valid_until',
-                'produkPrice:id,produk_id,event_id,harga_produk',
-                'produkPrice.produk:id,nama_produk,product_number',
+                'produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
+                'produkPrice.produk:id,nama_produk,product_number,code_gs1',
             ])
+            ->whereHas('produkPrice', function ($query) {
+                $query->where('tipe_harga', 'single')
+                    ->whereNotNull('produk_id');
+            })
             ->when($search !== '', function ($query) use ($search) {
                 $query->where(function ($mainQuery) use ($search) {
+                    $keyword = '%' . $search . '%';
+
                     $mainQuery
-                        ->whereHas('supplier', function ($supplierQuery) use ($search) {
+                        ->whereHas('supplier', function ($supplierQuery) use ($keyword) {
                             $supplierQuery
-                                ->where('nama_supplier', 'ilike', '%' . $search . '%')
-                                ->orWhere('contact_supplier', 'ilike', '%' . $search . '%');
+                                ->where('nama_supplier', 'ilike', $keyword)
+                                ->orWhere('contact_supplier', 'ilike', $keyword);
                         })
-                        ->orWhereHas('event', function ($eventQuery) use ($search) {
+                        ->orWhereHas('event', function ($eventQuery) use ($keyword) {
                             $eventQuery
-                                ->where('nama_event', 'ilike', '%' . $search . '%')
-                                ->orWhere('alamat_event', 'ilike', '%' . $search . '%');
+                                ->where('nama_event', 'ilike', $keyword)
+                                ->orWhere('alamat_event', 'ilike', $keyword)
+                                ->orWhereRaw("TO_CHAR(valid_from, 'YYYY-MM-DD') ILIKE ?", [$keyword])
+                                ->orWhereRaw("TO_CHAR(valid_until, 'YYYY-MM-DD') ILIKE ?", [$keyword]);
                         })
-                        ->orWhereHas('produkPrice.produk', function ($produkQuery) use ($search) {
+                        ->orWhereHas('produkPrice.produk', function ($produkQuery) use ($keyword) {
                             $produkQuery
-                                ->where('nama_produk', 'ilike', '%' . $search . '%')
-                                ->orWhere('product_number', 'ilike', '%' . $search . '%');
+                                ->where('nama_produk', 'ilike', $keyword)
+                                ->orWhere('product_number', 'ilike', $keyword)
+                                ->orWhere('code_gs1', 'ilike', $keyword);
                         });
                 });
             })
@@ -65,17 +74,37 @@ class EventInboundController extends Controller
     public function options(Request $request)
     {
         $eventId = $request->query('event_id');
+        $today = now()->toDateString();
+
+        $activeEvents = DataEvent::query()
+            ->select('id', 'nama_event', 'alamat_event', 'valid_from', 'valid_until')
+            ->whereDate('valid_until', '>=', $today)
+            ->orderBy('valid_from')
+            ->orderBy('nama_event')
+            ->get();
 
         $produkPrices = ProdukPrice::query()
             ->with([
-                'produk:id,nama_produk,product_number',
-                'event:id,nama_event',
+                'produk:id,nama_produk,product_number,code_gs1',
+                'event:id,nama_event,valid_from,valid_until',
             ])
+            ->where('tipe_harga', 'single')
+            ->whereNotNull('produk_id')
+            ->whereHas('event', function ($query) use ($today) {
+                $query->whereDate('valid_until', '>=', $today);
+            })
             ->when($eventId, function ($query) use ($eventId) {
                 $query->where('event_id', $eventId);
             })
             ->orderByDesc('created_at')
-            ->get(['id', 'produk_id', 'event_id', 'harga_produk']);
+            ->get([
+                'id',
+                'produk_id',
+                'event_id',
+                'tipe_harga',
+                'nama_bundle',
+                'harga_produk',
+            ]);
 
         return response()->json([
             'success' => true,
@@ -86,11 +115,7 @@ class EventInboundController extends Controller
                     ->orderBy('nama_supplier')
                     ->get(),
 
-                'events' => DataEvent::query()
-                    ->select('id', 'nama_event', 'alamat_event', 'valid_from', 'valid_until')
-                    ->orderByDesc('valid_from')
-                    ->orderBy('nama_event')
-                    ->get(),
+                'events' => $activeEvents,
 
                 'produk_prices' => $produkPrices,
             ],
@@ -99,31 +124,9 @@ class EventInboundController extends Controller
 
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'supplier_id' => ['nullable', 'uuid', 'exists:suppliers,id'],
-            'event_id' => ['required', 'uuid', 'exists:data_event,id'],
-            'produk_price_id' => ['required', 'uuid', 'exists:produk_price,id'],
-            'jumlah_produk' => ['required', 'integer', 'min:1'],
-            'tanggal_inbound' => ['required', 'date'],
-        ], [
-            'supplier_id.uuid' => 'Format supplier tidak valid.',
-            'supplier_id.exists' => 'Supplier tidak ditemukan.',
+        $validated = $this->validatePayload($request);
 
-            'event_id.required' => 'Event wajib dipilih.',
-            'event_id.uuid' => 'Format event tidak valid.',
-            'event_id.exists' => 'Event tidak ditemukan.',
-
-            'produk_price_id.required' => 'Produk price wajib dipilih.',
-            'produk_price_id.uuid' => 'Format produk price tidak valid.',
-            'produk_price_id.exists' => 'Produk price tidak ditemukan.',
-
-            'jumlah_produk.required' => 'Jumlah produk wajib diisi.',
-            'jumlah_produk.integer' => 'Jumlah produk harus berupa angka bulat.',
-            'jumlah_produk.min' => 'Jumlah produk minimal 1.',
-
-            'tanggal_inbound.required' => 'Tanggal inbound wajib diisi.',
-            'tanggal_inbound.date' => 'Tanggal inbound tidak valid.',
-        ]);
+        $this->validateActiveEvent($validated['event_id']);
 
         $this->validateProdukPriceMatchEvent(
             $validated['produk_price_id'],
@@ -137,25 +140,13 @@ class EventInboundController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Event inbound berhasil ditambahkan.',
-            'data' => $row->load([
-                'supplier:id,nama_supplier,contact_supplier',
-                'event:id,nama_event,alamat_event,valid_from,valid_until',
-                'produkPrice:id,produk_id,event_id,harga_produk',
-                'produkPrice.produk:id,nama_produk,product_number',
-            ]),
+            'data' => $this->loadInbound($row->id),
         ], 201);
     }
 
     public function show(string $id)
     {
-        $row = EventInbound::query()
-            ->with([
-                'supplier:id,nama_supplier,contact_supplier',
-                'event:id,nama_event,alamat_event,valid_from,valid_until',
-                'produkPrice:id,produk_id,event_id,harga_produk',
-                'produkPrice.produk:id,nama_produk,product_number',
-            ])
-            ->findOrFail($id);
+        $row = $this->loadInbound($id);
 
         return response()->json([
             'success' => true,
@@ -166,9 +157,42 @@ class EventInboundController extends Controller
 
     public function update(Request $request, string $id)
     {
-        $row = EventInbound::findOrFail($id);
+        $row = EventInbound::query()->findOrFail($id);
 
-        $validated = $request->validate([
+        $validated = $this->validatePayload($request);
+
+        $this->validateActiveEvent($validated['event_id']);
+
+        $this->validateProdukPriceMatchEvent(
+            $validated['produk_price_id'],
+            $validated['event_id']
+        );
+
+        $validated['supplier_id'] = $validated['supplier_id'] ?: null;
+
+        $row->update($validated);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Event inbound berhasil diperbarui.',
+            'data' => $this->loadInbound($row->id),
+        ]);
+    }
+
+    public function destroy(string $id)
+    {
+        $row = EventInbound::query()->findOrFail($id);
+        $row->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Event inbound berhasil dihapus.',
+        ]);
+    }
+
+    private function validatePayload(Request $request): array
+    {
+        return $request->validate([
             'supplier_id' => ['nullable', 'uuid', 'exists:suppliers,id'],
             'event_id' => ['required', 'uuid', 'exists:data_event,id'],
             'produk_price_id' => ['required', 'uuid', 'exists:produk_price,id'],
@@ -193,37 +217,26 @@ class EventInboundController extends Controller
             'tanggal_inbound.required' => 'Tanggal inbound wajib diisi.',
             'tanggal_inbound.date' => 'Tanggal inbound tidak valid.',
         ]);
-
-        $this->validateProdukPriceMatchEvent(
-            $validated['produk_price_id'],
-            $validated['event_id']
-        );
-
-        $validated['supplier_id'] = $validated['supplier_id'] ?: null;
-
-        $row->update($validated);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Event inbound berhasil diperbarui.',
-            'data' => $row->fresh()->load([
-                'supplier:id,nama_supplier,contact_supplier',
-                'event:id,nama_event,alamat_event,valid_from,valid_until',
-                'produkPrice:id,produk_id,event_id,harga_produk',
-                'produkPrice.produk:id,nama_produk,product_number',
-            ]),
-        ]);
     }
 
-    public function destroy(string $id)
+    private function validateActiveEvent(string $eventId): void
     {
-        $row = EventInbound::findOrFail($id);
-        $row->delete();
+        $exists = DataEvent::query()
+            ->where('id', $eventId)
+            ->whereDate('valid_until', '>=', now()->toDateString())
+            ->whereNull('deleted_at')
+            ->exists();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Event inbound berhasil dihapus.',
-        ]);
+        if (!$exists) {
+            abort(response()->json([
+                'message' => 'Event sudah terlewat dan tidak bisa dipilih untuk inbound.',
+                'errors' => [
+                    'event_id' => [
+                        'Event sudah terlewat dan tidak bisa dipilih untuk inbound.',
+                    ],
+                ],
+            ], 422));
+        }
     }
 
     private function validateProdukPriceMatchEvent(string $produkPriceId, string $eventId): void
@@ -231,18 +244,35 @@ class EventInboundController extends Controller
         $exists = ProdukPrice::query()
             ->where('id', $produkPriceId)
             ->where('event_id', $eventId)
+            ->where('tipe_harga', 'single')
+            ->whereNotNull('produk_id')
+            ->whereHas('event', function ($query) {
+                $query->whereDate('valid_until', '>=', now()->toDateString());
+            })
             ->whereNull('deleted_at')
             ->exists();
 
         if (!$exists) {
             abort(response()->json([
-                'message' => 'Produk price tidak sesuai dengan event yang dipilih.',
+                'message' => 'Produk price tidak sesuai dengan event yang dipilih atau bukan produk single.',
                 'errors' => [
                     'produk_price_id' => [
-                        'Produk price tidak sesuai dengan event yang dipilih.',
+                        'Produk price tidak sesuai dengan event yang dipilih atau bukan produk single.',
                     ],
                 ],
             ], 422));
         }
+    }
+
+    private function loadInbound(string $id): EventInbound
+    {
+        return EventInbound::query()
+            ->with([
+                'supplier:id,nama_supplier,contact_supplier',
+                'event:id,nama_event,alamat_event,valid_from,valid_until',
+                'produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
+                'produkPrice.produk:id,nama_produk,product_number,code_gs1',
+            ])
+            ->findOrFail($id);
     }
 }
