@@ -12,6 +12,7 @@ import PackageIndexPage from "./master-data/package/Index";
 import BrandIndexPage from "./master-data/brand/Index";
 import SatuanIndexPage from "./master-data/satuan/Index";
 import SupplierIndexPage from "./master-data/supplier/Index";
+import PaymentIndexPage from "./master-data/payment/Index";
 
 import DataEventIndexPage from "./data-event/Index";
 import EventInboundIndexPage from "./event-inbound/Index";
@@ -273,6 +274,13 @@ export default function AdminPage() {
                     icon: "SP",
                     component: SupplierIndexPage,
                 },
+                {
+    key: "payment",
+    label: "Payment",
+    description: "Kelola metode pembayaran",
+    icon: "PY",
+    component: PaymentIndexPage,
+},
             ],
         },
         {
