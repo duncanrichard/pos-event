@@ -655,9 +655,9 @@ class PosController extends Controller
             }
 
             $cart = $this->appendCartSummary($cart);
-            $totalAmount = (float) ($cart->total_amount ?? 0);
+            $totalAmount = $this->toRupiahInt($cart->total_amount ?? 0);
 
-            $inputPaidAmount = (float) $validated['paid_amount'];
+            $inputPaidAmount = $this->toRupiahInt($validated['paid_amount']);
             $requestedPaymentType = $validated['payment_type'] ?? self::PAYMENT_TYPE_LUNAS;
 
             $previousPaidAmount = (float) ($existingPayment?->paid_amount ?? 0);
@@ -797,7 +797,7 @@ class PosController extends Controller
         });
 
         $cart->total_qty = $items->sum('qty');
-        $cart->total_amount = $items->sum('subtotal_amount');
+        $cart->total_amount = $this->toRupiahInt($items->sum('subtotal_amount'));
         $cart->transaction_type = $this->getCartType($cart);
         $cart->nota = $this->buildNotaData($cart);
 
@@ -899,6 +899,18 @@ class PosController extends Controller
         ];
     }
 
+    private function toRupiahInt($value): int
+    {
+        $number = (float) ($value ?? 0);
+
+        if (!is_finite($number)) {
+            return 0;
+        }
+
+        // Rupiah real tanpa pembulatan ke atas.
+        return (int) floor($number);
+    }
+
     private function calculateLinePricing(?ProdukPrice $produkPrice, int $qty, ?EventCartDetail $detail = null): array
     {
         $qty = max((int) $qty, 1);
@@ -942,9 +954,10 @@ class PosController extends Controller
             }
         }
 
-        $discountAmountPerUnit = min($discountAmountPerUnit, $basePrice);
-        $finalPrice = max($basePrice - $discountAmountPerUnit, 0);
-        $subtotal = $finalPrice * $qty;
+        $basePrice = $this->toRupiahInt($basePrice);
+        $discountAmountPerUnit = $this->toRupiahInt(min($discountAmountPerUnit, $basePrice));
+        $finalPrice = $this->toRupiahInt(max($basePrice - $discountAmountPerUnit, 0));
+        $subtotal = $this->toRupiahInt($finalPrice * $qty);
 
         return [
             'base_price_amount' => $basePrice,
@@ -967,7 +980,7 @@ class PosController extends Controller
         }
 
         if ($discountType === 'percent') {
-            return round($basePrice * (min($discountValue, 100) / 100), 2);
+            return $this->toRupiahInt($basePrice * (min($discountValue, 100) / 100));
         }
 
         if ($discountType === 'nominal') {

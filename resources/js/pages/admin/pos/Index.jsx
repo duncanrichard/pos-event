@@ -188,12 +188,12 @@ export default function PosIndexPage() {
         return bundleProductOptions.find((item) => item.value === bundleProductId) || null;
     }, [bundleProductOptions, bundleProductId]);
 
-    const totalAmount = Number(cart?.total_amount || 0);
+    const totalAmount = normalizeMoney(cart?.total_amount);
     const totalQty = Number(cart?.total_qty || 0);
-    const paidNumber = Number(paidAmount || 0);
+    const paidNumber = normalizeMoney(paidAmount);
 
-    const paymentPaidAmount = Number(cart?.payment?.paid_amount || 0);
-    const paymentRemainingAmount = Number(
+    const paymentPaidAmount = normalizeMoney(cart?.payment?.paid_amount);
+    const paymentRemainingAmount = normalizeMoney(
         cart?.payment?.remaining_amount ?? Math.max(totalAmount - paymentPaidAmount, 0)
     );
 
@@ -641,7 +641,7 @@ export default function PosIndexPage() {
         try {
             const response = await axios.post(`/admin/pos/cart/${cart.id}/pay`, {
                 payment_id: paymentId,
-                paid_amount: paidAmount,
+                paid_amount: normalizeMoney(paidAmount),
                 payment_type: isPoCart ? paymentType : "Lunas",
             });
 
@@ -1550,7 +1550,7 @@ function PaymentPanel({
     isPoUnpaid,
     canReceivePayment,
 }) {
-    const paidNumber = Number(paidAmount || 0);
+    const paidNumber = normalizeMoney(paidAmount);
     const isDpPayment = isPoCart && paymentType === "DP";
 
     const paymentButtonDisabled =
@@ -1662,8 +1662,13 @@ function PaymentPanel({
                 <Input
                     label={isPoUnpaid ? "Jumlah Pelunasan" : isPoCart && paymentType === "DP" ? "Jumlah DP" : "Jumlah Dibayar"}
                     type="number"
+                    min="0"
+                    step="1"
                     value={paidAmount}
-                    onChange={(e) => setPaidAmount(e.target.value)}
+                    onChange={(e) => {
+                        const value = e.target.value.replace(/[^\d]/g, "");
+                        setPaidAmount(value);
+                    }}
                     placeholder="0"
                     disabled={!cart || saving || !canReceivePayment}
                 />
@@ -2996,14 +3001,26 @@ function escapeHtml(value) {
         .replaceAll("'", "&#039;");
 }
 
-function formatRupiah(value) {
+function normalizeMoney(value) {
     const number = Number(value || 0);
+
+    if (!Number.isFinite(number)) {
+        return 0;
+    }
+
+    // Rupiah real tanpa pembulatan ke atas.
+    return Math.floor(number);
+}
+
+function formatRupiah(value) {
+    const rupiah = normalizeMoney(value);
 
     return new Intl.NumberFormat("id-ID", {
         style: "currency",
         currency: "IDR",
+        minimumFractionDigits: 0,
         maximumFractionDigits: 0,
-    }).format(number);
+    }).format(rupiah);
 }
 
 function formatDate(value) {
