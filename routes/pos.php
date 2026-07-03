@@ -41,7 +41,7 @@ Route::prefix('admin/pos')
         | Produk satuan:
         | - kirim code_gs1
         |
-        | Bundle:
+        | Produk manual / Bundle:
         | - kirim produk_price_id
         |--------------------------------------------------------------------------
         */
@@ -52,6 +52,16 @@ Route::prefix('admin/pos')
         /*
         |--------------------------------------------------------------------------
         | Cart Item
+        |--------------------------------------------------------------------------
+        | Update qty dan diskon manual item:
+        | PATCH /admin/pos/cart/{cartId}/item/{detailId}
+        |
+        | Payload contoh:
+        | {
+        |   "qty": 10,
+        |   "manual_discount_type": "percent",
+        |   "manual_discount_value": 10
+        | }
         |--------------------------------------------------------------------------
         */
         Route::patch('/cart/{cartId}/item/{detailId}', 'updateItem')

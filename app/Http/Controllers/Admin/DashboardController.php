@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\DataEvent;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -18,6 +19,9 @@ class DashboardController extends Controller
     private const TYPE_PO = 'PO';
     private const TYPE_PEMBELIAN = 'Pembelian';
 
+    private const PAYMENT_STATUS_LUNAS = 'Lunas';
+    private const PAYMENT_STATUS_BELUM_LUNAS = 'Belum Lunas';
+
     public function index(Request $request)
     {
         $filters = $this->normalizeFilters($request);
@@ -30,11 +34,16 @@ class DashboardController extends Controller
                 'summary' => $this->getSummary($filters),
                 'stock_summary' => $this->getStockSummary($filters),
                 'demographics' => [
+                    'sales_overview' => $this->getSalesOverviewDemography($filters),
+                    'sales_by_date' => $this->getSalesByDateDemography($filters),
+                    'sales_by_hour' => $this->getSalesByHourDemography($filters),
                     'event_status' => $this->getEventStatusDemography(),
                     'stock_status' => $this->getStockStatusDemography($filters),
                     'transaction_type' => $this->getTransactionTypeDemography($filters),
                     'payment_status' => $this->getPaymentStatusDemography($filters),
+                    'payment_method' => $this->getPaymentMethodDemography($filters),
                     'customer_type' => $this->getCustomerTypeDemography($filters),
+                    'product_type' => $this->getProductTypeDemography($filters),
                 ],
                 'top_events' => $this->getTopEvents($filters),
                 'top_products' => $this->getTopProducts($filters),
@@ -53,10 +62,29 @@ class DashboardController extends Controller
 
     private function normalizeFilters(Request $request): array
     {
+        $dateFrom = $request->query('date_from') ?: now()->subDays(30)->toDateString();
+        $dateTo = $request->query('date_to') ?: now()->toDateString();
+
+        try {
+            $dateFrom = Carbon::parse($dateFrom)->toDateString();
+        } catch (\Throwable $e) {
+            $dateFrom = now()->subDays(30)->toDateString();
+        }
+
+        try {
+            $dateTo = Carbon::parse($dateTo)->toDateString();
+        } catch (\Throwable $e) {
+            $dateTo = now()->toDateString();
+        }
+
+        if ($dateFrom > $dateTo) {
+            [$dateFrom, $dateTo] = [$dateTo, $dateFrom];
+        }
+
         return [
             'event_id' => trim((string) $request->query('event_id', '')) ?: null,
-            'date_from' => $request->query('date_from') ?: now()->subDays(30)->toDateString(),
-            'date_to' => $request->query('date_to') ?: now()->toDateString(),
+            'date_from' => $dateFrom,
+            'date_to' => $dateTo,
         ];
     }
 
@@ -166,8 +194,8 @@ class DashboardController extends Controller
             })
             ->whereNull('pp.deleted_at')
             ->whereNull('p.deleted_at')
-            ->where(function ($q) {
-                $q->whereNull('pp.tipe_harga')
+            ->where(function ($query) {
+                $query->whereNull('pp.tipe_harga')
                     ->orWhere('pp.tipe_harga', 'single');
             })
             ->selectRaw('
@@ -279,15 +307,19 @@ class DashboardController extends Controller
             ])
             ->first();
 
+        $paidTransactions = (int) ($trx->paid_transactions ?? 0);
+        $omzet = (float) ($trx->omzet ?? 0);
+
         return array_merge($master, [
             'total_transactions' => (int) ($trx->total_transactions ?? 0),
-            'paid_transactions' => (int) ($trx->paid_transactions ?? 0),
+            'paid_transactions' => $paidTransactions,
             'draft_transactions' => (int) ($trx->draft_transactions ?? 0),
             'void_transactions' => (int) ($trx->void_transactions ?? 0),
             'total_qty_sold' => (int) ($trx->total_qty_sold ?? 0),
-            'omzet' => (float) ($trx->omzet ?? 0),
+            'omzet' => $omzet,
             'paid_amount' => (float) ($trx->paid_amount ?? 0),
             'remaining_amount' => (float) ($trx->remaining_amount ?? 0),
+            'average_transaction' => $paidTransactions > 0 ? round($omzet / $paidTransactions, 2) : 0,
         ]);
     }
 
@@ -309,34 +341,130 @@ class DashboardController extends Controller
         ];
     }
 
-    private function getEventStatusDemography()
+    private function getSalesOverviewDemography(array $filters): array
     {
-        $today = now()->toDateString();
-
-        return DB::table('data_event')
-            ->whereNull('deleted_at')
+        $row = $this->cartBaseQuery($filters)
             ->selectRaw("
-                CASE
-                    WHEN valid_until < ? THEN 'Terlewat'
-                    WHEN valid_from > ? THEN 'Akan Datang'
-                    ELSE 'Berjalan'
-                END as label,
-                COUNT(*) as total
-            ", [$today, $today])
-            ->groupByRaw("
-                CASE
-                    WHEN valid_until < ? THEN 'Terlewat'
-                    WHEN valid_from > ? THEN 'Akan Datang'
-                    ELSE 'Berjalan'
-                END
-            ", [$today, $today])
-            ->orderByDesc('total')
+                COUNT(DISTINCT CASE WHEN ec.status = ? THEN ec.id END) as paid_transactions,
+                COUNT(DISTINCT CASE WHEN ec.status = ? THEN ec.id END) as draft_transactions,
+                COUNT(DISTINCT CASE WHEN ec.status IN (?, ?, ?) THEN ec.id END) as void_transactions,
+                COALESCE(SUM(
+                    CASE WHEN ec.status = ?
+                    THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                    ELSE 0 END
+                ), 0) as omzet,
+                COALESCE(SUM(
+                    CASE WHEN ec.status = ?
+                    THEN COALESCE(ct.total_qty, 0)
+                    ELSE 0 END
+                ), 0) as qty_sold
+            ", [
+                self::STATUS_PAID,
+                self::STATUS_DRAFT,
+                self::STATUS_VOID_CARTS,
+                self::STATUS_VOID_TRANSAKSI,
+                self::STATUS_VOID_OLD,
+                self::STATUS_PAID,
+                self::STATUS_PAID,
+            ])
+            ->first();
+
+        return [
+            [
+                'label' => 'Transaksi Paid',
+                'total' => (int) ($row->paid_transactions ?? 0),
+                'omzet' => (float) ($row->omzet ?? 0),
+            ],
+            [
+                'label' => 'Transaksi Draft',
+                'total' => (int) ($row->draft_transactions ?? 0),
+                'omzet' => 0,
+            ],
+            [
+                'label' => 'Transaksi Void',
+                'total' => (int) ($row->void_transactions ?? 0),
+                'omzet' => 0,
+            ],
+            [
+                'label' => 'Produk Terjual',
+                'total' => (int) ($row->qty_sold ?? 0),
+                'omzet' => (float) ($row->omzet ?? 0),
+            ],
+        ];
+    }
+
+    private function getSalesByDateDemography(array $filters)
+    {
+        return $this->cartBaseQuery($filters)
+            ->where('ec.status', self::STATUS_PAID)
+            ->selectRaw("
+                DATE(ec.tanggal_carts) as label,
+                COUNT(DISTINCT ec.id) as total,
+                COALESCE(SUM(ct.total_qty), 0) as qty,
+                COALESCE(SUM(COALESCE(ep.total_amount, ct.total_amount, 0)), 0) as omzet
+            ")
+            ->groupByRaw('DATE(ec.tanggal_carts)')
+            ->orderByRaw('DATE(ec.tanggal_carts) ASC')
             ->get()
             ->map(fn ($row) => [
                 'label' => $row->label,
                 'total' => (int) $row->total,
+                'qty' => (int) $row->qty,
+                'omzet' => (float) $row->omzet,
             ]);
     }
+
+    private function getSalesByHourDemography(array $filters)
+{
+    $subQuery = $this->cartBaseQuery($filters)
+        ->where('ec.status', self::STATUS_PAID)
+        ->selectRaw("
+            TO_CHAR(ec.created_at, 'HH24:00') as label,
+            ec.id as cart_id,
+            COALESCE(ep.total_amount, ct.total_amount, 0) as omzet
+        ");
+
+    return DB::query()
+        ->fromSub($subQuery, 'sales_hour')
+        ->selectRaw('
+            label,
+            COUNT(DISTINCT cart_id) as total,
+            COALESCE(SUM(omzet), 0) as omzet
+        ')
+        ->groupBy('label')
+        ->orderBy('label')
+        ->get()
+        ->map(fn ($row) => [
+            'label' => $row->label,
+            'total' => (int) $row->total,
+            'omzet' => (float) $row->omzet,
+        ]);
+}
+   private function getEventStatusDemography()
+{
+    $today = now()->toDateString();
+
+    $subQuery = DB::table('data_event')
+        ->whereNull('deleted_at')
+        ->selectRaw("
+            CASE
+                WHEN valid_until < ? THEN 'Terlewat'
+                WHEN valid_from > ? THEN 'Akan Datang'
+                ELSE 'Berjalan'
+            END as label
+        ", [$today, $today]);
+
+    return DB::query()
+        ->fromSub($subQuery, 'event_status')
+        ->selectRaw('label, COUNT(*) as total')
+        ->groupBy('label')
+        ->orderByDesc('total')
+        ->get()
+        ->map(fn ($row) => [
+            'label' => $row->label,
+            'total' => (int) $row->total,
+        ]);
+}
 
     private function getStockStatusDemography(array $filters)
     {
@@ -368,90 +496,166 @@ class DashboardController extends Controller
     }
 
     private function getTransactionTypeDemography(array $filters)
-    {
-        return $this->cartBaseQuery($filters)
-            ->selectRaw("
-                COALESCE(ec.transaction_type, ?) as label,
-                COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as omzet
-            ", [self::TYPE_PEMBELIAN, self::STATUS_PAID])
-            ->groupByRaw('COALESCE(ec.transaction_type, ?)', [self::TYPE_PEMBELIAN])
-            ->orderByDesc('total')
-            ->get()
-            ->map(fn ($row) => [
-                'label' => $row->label,
-                'total' => (int) $row->total,
-                'omzet' => (float) $row->omzet,
-            ]);
-    }
+{
+    $subQuery = $this->cartBaseQuery($filters)
+        ->selectRaw("
+            COALESCE(ec.transaction_type, ?) as label,
+            ec.id as cart_id,
+            CASE
+                WHEN ec.status = ?
+                THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                ELSE 0
+            END as omzet
+        ", [self::TYPE_PEMBELIAN, self::STATUS_PAID]);
 
-    private function getPaymentStatusDemography(array $filters)
-    {
-        return $this->cartBaseQuery($filters)
-            ->selectRaw("
-                COALESCE(ep.payment_status, ec.status, '-') as label,
-                COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as omzet
-            ", [self::STATUS_PAID])
-            ->groupByRaw("COALESCE(ep.payment_status, ec.status, '-')")
-            ->orderByDesc('total')
-            ->get()
-            ->map(fn ($row) => [
-                'label' => $row->label,
-                'total' => (int) $row->total,
-                'omzet' => (float) $row->omzet,
-            ]);
-    }
+    return DB::query()
+        ->fromSub($subQuery, 'trx_type')
+        ->selectRaw('
+            label,
+            COUNT(DISTINCT cart_id) as total,
+            COALESCE(SUM(omzet), 0) as omzet
+        ')
+        ->groupBy('label')
+        ->orderByDesc('total')
+        ->get()
+        ->map(fn ($row) => [
+            'label' => $row->label,
+            'total' => (int) $row->total,
+            'omzet' => (float) $row->omzet,
+        ]);
+}
+   private function getPaymentStatusDemography(array $filters)
+{
+    $subQuery = $this->cartBaseQuery($filters)
+        ->selectRaw("
+            COALESCE(ep.payment_status, ec.status, '-') as label,
+            ec.id as cart_id,
+            CASE
+                WHEN ec.status = ?
+                THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                ELSE 0
+            END as omzet
+        ", [self::STATUS_PAID]);
+
+    return DB::query()
+        ->fromSub($subQuery, 'payment_status')
+        ->selectRaw('
+            label,
+            COUNT(DISTINCT cart_id) as total,
+            COALESCE(SUM(omzet), 0) as omzet
+        ')
+        ->groupBy('label')
+        ->orderByDesc('total')
+        ->get()
+        ->map(fn ($row) => [
+            'label' => $row->label,
+            'total' => (int) $row->total,
+            'omzet' => (float) $row->omzet,
+        ]);
+}
+  private function getPaymentMethodDemography(array $filters)
+{
+    $subQuery = $this->cartBaseQuery($filters)
+        ->where('ec.status', self::STATUS_PAID)
+        ->selectRaw("
+            COALESCE(pay.payment, '-') as label,
+            ec.id as cart_id,
+            COALESCE(ep.total_amount, ct.total_amount, 0) as omzet
+        ");
+
+    return DB::query()
+        ->fromSub($subQuery, 'payment_method')
+        ->selectRaw('
+            label,
+            COUNT(DISTINCT cart_id) as total,
+            COALESCE(SUM(omzet), 0) as omzet
+        ')
+        ->groupBy('label')
+        ->orderByDesc('omzet')
+        ->orderByDesc('total')
+        ->get()
+        ->map(fn ($row) => [
+            'label' => $row->label,
+            'total' => (int) $row->total,
+            'omzet' => (float) $row->omzet,
+        ]);
+}
 
     private function getCustomerTypeDemography(array $filters)
+{
+    $subQuery = $this->cartBaseQuery($filters)
+        ->selectRaw("
+            CASE
+                WHEN LOWER(COALESCE(ec.customer, '')) IN (
+                    '',
+                    '-',
+                    'walk in customer',
+                    'walk-in customer',
+                    'walkin customer',
+                    'walkin'
+                )
+                THEN 'Walk In Customer'
+                ELSE 'Customer Bernama'
+            END as label,
+            ec.id as cart_id,
+            CASE
+                WHEN ec.status = ?
+                THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                ELSE 0
+            END as omzet
+        ", [self::STATUS_PAID]);
+
+    return DB::query()
+        ->fromSub($subQuery, 'customer_type')
+        ->selectRaw('
+            label,
+            COUNT(DISTINCT cart_id) as total,
+            COALESCE(SUM(omzet), 0) as omzet
+        ')
+        ->groupBy('label')
+        ->orderByDesc('total')
+        ->get()
+        ->map(fn ($row) => [
+            'label' => $row->label,
+            'total' => (int) $row->total,
+            'omzet' => (float) $row->omzet,
+        ]);
+}
+    private function getProductTypeDemography(array $filters)
     {
-        return $this->cartBaseQuery($filters)
+        $query = DB::table('event_carts_detail as ecd')
+            ->join('event_carts as ec', 'ec.id', '=', 'ecd.event_carts_id')
+            ->join('produk_price as pp', 'pp.id', '=', 'ecd.produk_price_id')
+            ->whereNull('ecd.deleted_at')
+            ->whereNull('ec.deleted_at')
+            ->whereNull('pp.deleted_at')
+            ->where('ec.status', self::STATUS_PAID);
+
+        if (!empty($filters['event_id'])) {
+            $query->where('ec.event_id', $filters['event_id']);
+        }
+
+        if (!empty($filters['date_from'])) {
+            $query->whereDate('ec.tanggal_carts', '>=', $filters['date_from']);
+        }
+
+        if (!empty($filters['date_to'])) {
+            $query->whereDate('ec.tanggal_carts', '<=', $filters['date_to']);
+        }
+
+        return $query
             ->selectRaw("
                 CASE
-                    WHEN LOWER(COALESCE(ec.customer, '')) IN (
-                        '',
-                        '-',
-                        'walk in customer',
-                        'walk-in customer',
-                        'walkin customer',
-                        'walkin'
-                    )
-                    THEN 'Walk In Customer'
-                    ELSE 'Customer Bernama'
+                    WHEN pp.tipe_harga = 'bundle' THEN 'Bundle'
+                    ELSE 'Single'
                 END as label,
-                COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as omzet
-            ", [self::STATUS_PAID])
+                COALESCE(SUM(ecd.qty), 0) as total,
+                COALESCE(SUM(ecd.qty * COALESCE(pp.harga_produk, 0)), 0) as omzet
+            ")
             ->groupByRaw("
                 CASE
-                    WHEN LOWER(COALESCE(ec.customer, '')) IN (
-                        '',
-                        '-',
-                        'walk in customer',
-                        'walk-in customer',
-                        'walkin customer',
-                        'walkin'
-                    )
-                    THEN 'Walk In Customer'
-                    ELSE 'Customer Bernama'
+                    WHEN pp.tipe_harga = 'bundle' THEN 'Bundle'
+                    ELSE 'Single'
                 END
             ")
             ->orderByDesc('total')
@@ -564,37 +768,37 @@ class DashboardController extends Controller
     }
 
     private function getRecentTransactions(array $filters)
-    {
-        return $this->cartBaseQuery($filters)
-            ->selectRaw("
-                ec.id,
-                ec.no_invoice,
-                COALESCE(NULLIF(TRIM(ec.customer), ''), 'Walk In Customer') as customer,
-                ec.tanggal_carts,
-                ec.status,
-                COALESCE(ec.transaction_type, ?) as transaction_type,
-                de.nama_event,
-                COALESCE(ct.total_qty, 0) as total_qty,
-                COALESCE(ep.total_amount, ct.total_amount, 0) as total_amount,
-                COALESCE(ep.payment_status, ec.status, '-') as payment_status,
-                COALESCE(pay.payment, '-') as payment_method
-            ", [self::TYPE_PEMBELIAN])
-            ->orderByDesc('ec.tanggal_carts')
-            ->orderByDesc('ec.created_at')
-            ->limit(10)
-            ->get()
-            ->map(fn ($row) => [
-                'id' => $row->id,
-                'no_invoice' => $row->no_invoice,
-                'customer' => $row->customer,
-                'tanggal_carts' => $row->tanggal_carts,
-                'status' => $row->status,
-                'transaction_type' => $row->transaction_type,
-                'nama_event' => $row->nama_event ?: '-',
-                'total_qty' => (int) $row->total_qty,
-                'total_amount' => (float) $row->total_amount,
-                'payment_status' => $row->payment_status,
-                'payment_method' => $row->payment_method,
-            ]);
-    }
+{
+    return $this->cartBaseQuery($filters)
+        ->selectRaw("
+            ec.id,
+            ec.no_invoice,
+            COALESCE(NULLIF(TRIM(ec.customer), ''), 'Walk In Customer') as customer,
+            ec.tanggal_carts,
+            ec.status,
+            COALESCE(ec.transaction_type, ?) as transaction_type,
+            de.nama_event,
+            COALESCE(ct.total_qty, 0) as total_qty,
+            COALESCE(ep.total_amount, ct.total_amount, 0) as total_amount,
+            COALESCE(ep.payment_status, ec.status, '-') as payment_status,
+            COALESCE(pay.payment, '-') as payment_method
+        ", [self::TYPE_PEMBELIAN])
+        ->orderByDesc('ec.tanggal_carts')
+        ->orderByDesc('ec.created_at')
+        ->limit(10)
+        ->get()
+        ->map(fn ($row) => [
+            'id' => $row->id,
+            'no_invoice' => $row->no_invoice,
+            'customer' => $row->customer,
+            'tanggal_carts' => $row->tanggal_carts,
+            'status' => $row->status,
+            'transaction_type' => $row->transaction_type,
+            'nama_event' => $row->nama_event ?: '-',
+            'total_qty' => (int) $row->total_qty,
+            'total_amount' => (float) $row->total_amount,
+            'payment_status' => $row->payment_status,
+            'payment_method' => $row->payment_method,
+        ]);
+}
 }

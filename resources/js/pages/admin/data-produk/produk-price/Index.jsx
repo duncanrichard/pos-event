@@ -8,13 +8,37 @@ const initialForm = {
     event_id: "",
     nama_bundle: "",
     harga_produk: "",
-    items: [
+    // Untuk single tidak perlu isi bundle. Saat pilih Bundle, baris item akan dibuat otomatis.
+    items: [],
+    discount_tiers: [
         {
-            produk_id: "",
-            qty: 1,
+            min_qty: 1,
+            max_qty: "",
+            discount_type: "percent",
+            discount_value: "",
+            is_active: true,
         },
     ],
 };
+
+function normalizeTipeHarga(value, row = {}) {
+    const text = String(value || "").trim().toLowerCase();
+
+    if (text === "bundle") return "bundle";
+    if (text === "single") return "single";
+
+    if (row?.produk_id) return "single";
+    if (row?.nama_bundle) return "bundle";
+
+    return "single";
+}
+
+function shouldHideBundleError(error, tipeHarga) {
+    return (
+        normalizeTipeHarga(tipeHarga) === "single" &&
+        String(error || "").toLowerCase().includes("isi bundle")
+    );
+}
 
 export default function ProdukPriceIndexPage() {
     const [rows, setRows] = useState([]);
@@ -44,8 +68,9 @@ export default function ProdukPriceIndexPage() {
     const [success, setSuccess] = useState("");
 
     const isEdit = useMemo(() => Boolean(editingId), [editingId]);
-    const isBundle = form.tipe_harga === "bundle";
-    const isSingle = form.tipe_harga === "single";
+    const normalizedTipeHarga = normalizeTipeHarga(form.tipe_harga);
+    const isBundle = normalizedTipeHarga === "bundle";
+    const isSingle = normalizedTipeHarga === "single";
 
     const produkSelectOptions = useMemo(() => {
         return produkOptions.map((item) => ({
@@ -163,7 +188,7 @@ export default function ProdukPriceIndexPage() {
     const openEditModal = async (row) => {
         await fetchOptions();
 
-        const tipeHarga = row.tipe_harga || (row.nama_bundle ? "bundle" : "single");
+        const tipeHarga = normalizeTipeHarga(row.tipe_harga, row);
 
         setEditingId(row.id);
         setForm({
@@ -173,20 +198,35 @@ export default function ProdukPriceIndexPage() {
             nama_bundle: row.nama_bundle || "",
             harga_produk: row.harga_produk || "",
             items:
-                Array.isArray(row.bundle_details) && row.bundle_details.length > 0
-                    ? row.bundle_details.map((detail) => ({
-                          produk_id: detail.produk_id || detail.produk?.id || "",
-                          qty: detail.qty || 1,
-                      }))
-                    : Array.isArray(row.bundleDetails) && row.bundleDetails.length > 0
-                    ? row.bundleDetails.map((detail) => ({
-                          produk_id: detail.produk_id || detail.produk?.id || "",
-                          qty: detail.qty || 1,
+                tipeHarga === "bundle"
+                    ? Array.isArray(row.bundle_details) && row.bundle_details.length > 0
+                        ? row.bundle_details.map((detail) => ({
+                              produk_id: detail.produk_id || detail.produk?.id || "",
+                              qty: detail.qty || 1,
+                          }))
+                        : Array.isArray(row.bundleDetails) && row.bundleDetails.length > 0
+                        ? row.bundleDetails.map((detail) => ({
+                              produk_id: detail.produk_id || detail.produk?.id || "",
+                              qty: detail.qty || 1,
+                          }))
+                        : [{ produk_id: "", qty: 1 }]
+                    : [],
+            discount_tiers:
+                Array.isArray(row.discount_tiers) && row.discount_tiers.length > 0
+                    ? row.discount_tiers.map((tier) => ({
+                          min_qty: tier.min_qty || 1,
+                          max_qty: tier.max_qty ?? "",
+                          discount_type: tier.discount_type || "percent",
+                          discount_value: tier.discount_value ?? "",
+                          is_active: tier.is_active !== false,
                       }))
                     : [
                           {
-                              produk_id: "",
-                              qty: 1,
+                              min_qty: 1,
+                              max_qty: "",
+                              discount_type: "percent",
+                              discount_value: "",
+                              is_active: true,
                           },
                       ],
         });
@@ -203,19 +243,25 @@ export default function ProdukPriceIndexPage() {
     const handleChange = (e) => {
         const { name, value } = e.target;
 
+        // Setiap user mengubah form, error lama dibersihkan agar pesan lama
+        // seperti "Isi bundle minimal 1 produk" tidak tetap tampil saat mode sudah Single.
+        setError("");
+
         setForm((prev) => {
             if (name === "tipe_harga") {
+                const nextType = value === "bundle" ? "bundle" : "single";
+
                 return {
                     ...prev,
-                    tipe_harga: value,
-                    produk_id: value === "bundle" ? "" : prev.produk_id,
-                    nama_bundle: value === "single" ? "" : prev.nama_bundle,
+                    tipe_harga: nextType,
+                    produk_id: nextType === "bundle" ? "" : prev.produk_id,
+                    nama_bundle: nextType === "single" ? "" : prev.nama_bundle,
                     items:
-                        value === "bundle"
+                        nextType === "bundle"
                             ? prev.items?.length
                                 ? prev.items
                                 : [{ produk_id: "", qty: 1 }]
-                            : [{ produk_id: "", qty: 1 }],
+                            : [],
                 };
             }
 
@@ -227,6 +273,7 @@ export default function ProdukPriceIndexPage() {
     };
 
     const handleSelectChange = (name, selectedOption) => {
+        setError("");
         setForm((prev) => ({
             ...prev,
             [name]: selectedOption?.value || "",
@@ -234,6 +281,7 @@ export default function ProdukPriceIndexPage() {
     };
 
     const handleBundleItemChange = (index, field, value) => {
+        setError("");
         setForm((prev) => {
             const nextItems = [...prev.items];
 
@@ -250,6 +298,7 @@ export default function ProdukPriceIndexPage() {
     };
 
     const handleBundleItemSelectChange = (index, selectedOption) => {
+        setError("");
         setForm((prev) => {
             const nextItems = [...prev.items];
 
@@ -289,6 +338,67 @@ export default function ProdukPriceIndexPage() {
         });
     };
 
+    const handleDiscountTierChange = (index, field, value) => {
+        setError("");
+        setForm((prev) => {
+            const nextTiers = [...(prev.discount_tiers || [])];
+
+            nextTiers[index] = {
+                ...nextTiers[index],
+                [field]:
+                    field === "is_active"
+                        ? Boolean(value)
+                        : field === "discount_type"
+                        ? value
+                        : value,
+            };
+
+            return {
+                ...prev,
+                discount_tiers: nextTiers,
+            };
+        });
+    };
+
+    const addDiscountTier = () => {
+        setForm((prev) => ({
+            ...prev,
+            discount_tiers: [
+                ...(prev.discount_tiers || []),
+                {
+                    min_qty: "",
+                    max_qty: "",
+                    discount_type: "percent",
+                    discount_value: "",
+                    is_active: true,
+                },
+            ],
+        }));
+    };
+
+    const removeDiscountTier = (index) => {
+        setForm((prev) => {
+            const nextTiers = (prev.discount_tiers || []).filter(
+                (_, tierIndex) => tierIndex !== index
+            );
+
+            return {
+                ...prev,
+                discount_tiers: nextTiers.length > 0
+                    ? nextTiers
+                    : [
+                          {
+                              min_qty: 1,
+                              max_qty: "",
+                              discount_type: "percent",
+                              discount_value: "",
+                              is_active: true,
+                          },
+                      ],
+            };
+        });
+    };
+
     const getValidationMessage = (err) => {
         if (err.response?.data?.errors) {
             const errors = err.response.data.errors;
@@ -307,6 +417,8 @@ export default function ProdukPriceIndexPage() {
     };
 
     const validateBeforeSubmit = () => {
+        const tipeHarga = normalizeTipeHarga(form.tipe_harga);
+
         if (!form.event_id) {
             return "Event wajib dipilih.";
         }
@@ -315,16 +427,16 @@ export default function ProdukPriceIndexPage() {
             return "Harga wajib diisi dan tidak boleh kurang dari 0.";
         }
 
-        if (isSingle && !form.produk_id) {
+        if (tipeHarga === "single" && !form.produk_id) {
             return "Produk wajib dipilih untuk harga single.";
         }
 
-        if (isBundle) {
+        if (tipeHarga === "bundle") {
             if (!String(form.nama_bundle || "").trim()) {
                 return "Nama bundle wajib diisi.";
             }
 
-            const validItems = form.items.filter(
+            const validItems = (form.items || []).filter(
                 (item) => item.produk_id && Number(item.qty || 0) > 0
             );
 
@@ -334,6 +446,44 @@ export default function ProdukPriceIndexPage() {
 
             // Produk yang sama boleh dimasukkan lebih dari 1 baris.
             // Contoh: Produk A x1 dan Produk A x2 tetap disimpan sebagai item terpisah.
+        }
+
+        const validDiscountTiers = (form.discount_tiers || []).filter((tier) => {
+            return (
+                String(tier.min_qty || "").trim() !== "" ||
+                String(tier.max_qty || "").trim() !== "" ||
+                String(tier.discount_value || "").trim() !== ""
+            );
+        });
+
+        for (let index = 0; index < validDiscountTiers.length; index += 1) {
+            const tier = validDiscountTiers[index];
+            const minQty = Number(tier.min_qty || 0);
+            const maxQty =
+                tier.max_qty === "" || tier.max_qty === null || tier.max_qty === undefined
+                    ? null
+                    : Number(tier.max_qty);
+            const discountValue = Number(tier.discount_value || 0);
+
+            if (!Number.isFinite(minQty) || minQty < 1) {
+                return `Diskon tier ${index + 1}: minimal qty wajib minimal 1.`;
+            }
+
+            if (maxQty !== null && (!Number.isFinite(maxQty) || maxQty < minQty)) {
+                return `Diskon tier ${index + 1}: maksimal qty harus kosong atau lebih besar/sama dengan minimal qty.`;
+            }
+
+            if (!["percent", "nominal"].includes(tier.discount_type)) {
+                return `Diskon tier ${index + 1}: tipe diskon tidak valid.`;
+            }
+
+            if (!Number.isFinite(discountValue) || discountValue < 0) {
+                return `Diskon tier ${index + 1}: nilai diskon tidak boleh kurang dari 0.`;
+            }
+
+            if (tier.discount_type === "percent" && discountValue > 100) {
+                return `Diskon tier ${index + 1}: diskon persen maksimal 100%.`;
+            }
         }
 
         return "";
@@ -353,20 +503,39 @@ export default function ProdukPriceIndexPage() {
         setError("");
         setSuccess("");
 
+        const tipeHarga = normalizeTipeHarga(form.tipe_harga);
+
         const payload = {
-            tipe_harga: form.tipe_harga,
+            tipe_harga: tipeHarga,
             event_id: form.event_id,
             harga_produk: form.harga_produk,
-            produk_id: isSingle ? form.produk_id : null,
-            nama_bundle: isBundle ? form.nama_bundle : null,
-            items: isBundle
-                ? form.items
+            produk_id: tipeHarga === "single" ? form.produk_id : null,
+            nama_bundle: tipeHarga === "bundle" ? form.nama_bundle : null,
+            items: tipeHarga === "bundle"
+                ? (form.items || [])
                       .filter((item) => item.produk_id && Number(item.qty || 0) > 0)
                       .map((item) => ({
                           produk_id: item.produk_id,
                           qty: Number(item.qty || 1),
                       }))
                 : [],
+            discount_tiers: (form.discount_tiers || [])
+                .filter((tier) => {
+                    return (
+                        String(tier.min_qty || "").trim() !== "" &&
+                        String(tier.discount_value || "").trim() !== ""
+                    );
+                })
+                .map((tier) => ({
+                    min_qty: Number(tier.min_qty || 1),
+                    max_qty:
+                        tier.max_qty === "" || tier.max_qty === null || tier.max_qty === undefined
+                            ? null
+                            : Number(tier.max_qty),
+                    discount_type: tier.discount_type || "percent",
+                    discount_value: Number(tier.discount_value || 0),
+                    is_active: tier.is_active !== false,
+                })),
         };
 
         try {
@@ -509,6 +678,7 @@ export default function ProdukPriceIndexPage() {
                                         <TableHead>Periode Event</TableHead>
                                         <TableHead>Isi Bundle</TableHead>
                                         <TableHead>Harga</TableHead>
+                                        <TableHead>Diskon Qty</TableHead>
                                         <TableHead>Tanggal Dibuat</TableHead>
                                         <TableHead align="right">Aksi</TableHead>
                                     </tr>
@@ -516,10 +686,10 @@ export default function ProdukPriceIndexPage() {
 
                                 <tbody className="divide-y divide-slate-100 bg-white">
                                     {loading ? (
-                                        <LoadingRows colSpan={9} />
+                                        <LoadingRows colSpan={10} />
                                     ) : rows.length === 0 ? (
                                         <EmptyRow
-                                            colSpan={9}
+                                            colSpan={10}
                                             title="Data produk price belum tersedia"
                                             description="Tambahkan harga single produk atau bundle per event."
                                             buttonText="Tambah Harga"
@@ -615,6 +785,10 @@ export default function ProdukPriceIndexPage() {
                                                         {formatRupiah(row.harga_produk)}
                                                     </TableCell>
 
+                                                    <td className="min-w-[240px] px-5 py-4">
+                                                        <DiscountTierList tiers={getDiscountTiers(row)} />
+                                                    </td>
+
                                                     <TableCell>
                                                         {formatDate(row.created_at)}
                                                     </TableCell>
@@ -679,6 +853,9 @@ export default function ProdukPriceIndexPage() {
                     onBundleItemSelectChange={handleBundleItemSelectChange}
                     onAddBundleItem={addBundleItem}
                     onRemoveBundleItem={removeBundleItem}
+                    onDiscountTierChange={handleDiscountTierChange}
+                    onAddDiscountTier={addDiscountTier}
+                    onRemoveDiscountTier={removeDiscountTier}
                 />
             )}
         </div>
@@ -704,6 +881,9 @@ function ProdukPriceModal({
     onBundleItemSelectChange,
     onAddBundleItem,
     onRemoveBundleItem,
+    onDiscountTierChange,
+    onAddDiscountTier,
+    onRemoveDiscountTier,
 }) {
     const hasProduk = produkSelectOptions.length > 0;
     const hasEvent = eventSelectOptions.length > 0;
@@ -713,6 +893,8 @@ function ProdukPriceModal({
 
     const selectedProduk =
         produkSelectOptions.find((item) => item.value === form.produk_id) || null;
+
+    const visibleError = shouldHideBundleError(error, form.tipe_harga) ? "" : error;
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
@@ -744,7 +926,7 @@ function ProdukPriceModal({
                 </div>
 
                 <div className="p-6">
-                    {error && <Alert type="error" message={error} />}
+                    {visibleError && <Alert type="error" message={visibleError} />}
 
                     {!optionLoading && !hasProduk && (
                         <Alert
@@ -1007,6 +1189,14 @@ function ProdukPriceModal({
                             required
                         />
 
+                        <DiscountTiersEditor
+                            tiers={form.discount_tiers || []}
+                            saving={saving}
+                            onChange={onDiscountTierChange}
+                            onAdd={onAddDiscountTier}
+                            onRemove={onRemoveDiscountTier}
+                        />
+
                         <div className="flex justify-end gap-3 pt-2">
                             <button
                                 type="button"
@@ -1037,6 +1227,151 @@ function ProdukPriceModal({
                     </form>
                 </div>
             </div>
+        </div>
+    );
+}
+
+
+function DiscountTiersEditor({ tiers, saving, onChange, onAdd, onRemove }) {
+    const safeTiers = Array.isArray(tiers) && tiers.length > 0
+        ? tiers
+        : [
+              {
+                  min_qty: 1,
+                  max_qty: "",
+                  discount_type: "percent",
+                  discount_value: "",
+                  is_active: true,
+              },
+          ];
+
+    return (
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <h4 className="text-sm font-black text-slate-950">
+                        Diskon Min Pembelian
+                    </h4>
+                    <p className="mt-1 text-xs font-semibold text-slate-500">
+                        Atur diskon berdasarkan qty. Contoh: 1-10 diskon 10%, 11-100 diskon 15%.
+                    </p>
+                </div>
+
+                <button
+                    type="button"
+                    onClick={onAdd}
+                    disabled={saving}
+                    className="w-fit rounded-xl bg-slate-950 px-4 py-2 text-xs font-black text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                    Tambah Diskon
+                </button>
+            </div>
+
+            <div className="space-y-3">
+                {safeTiers.map((tier, index) => (
+                    <div
+                        key={index}
+                        className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-3 md:grid-cols-[100px_100px_130px_130px_110px_auto] md:items-end"
+                    >
+                        <Input
+                            label="Min Qty"
+                            type="number"
+                            min="1"
+                            value={tier.min_qty}
+                            onChange={(e) => onChange(index, "min_qty", e.target.value)}
+                            disabled={saving}
+                        />
+
+                        <Input
+                            label="Max Qty"
+                            type="number"
+                            min="1"
+                            value={tier.max_qty ?? ""}
+                            onChange={(e) => onChange(index, "max_qty", e.target.value)}
+                            placeholder="Kosong"
+                            disabled={saving}
+                        />
+
+                        <div>
+                            <label className="mb-2 block text-sm font-black text-slate-700">
+                                Tipe Diskon
+                            </label>
+                            <select
+                                value={tier.discount_type || "percent"}
+                                onChange={(e) => onChange(index, "discount_type", e.target.value)}
+                                disabled={saving}
+                                className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm font-semibold text-slate-700 outline-none transition focus:border-slate-950 focus:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                <option value="percent">Persen (%)</option>
+                                <option value="nominal">Nominal (Rp)</option>
+                            </select>
+                        </div>
+
+                        <Input
+                            label="Nilai"
+                            type="number"
+                            min="0"
+                            value={tier.discount_value}
+                            onChange={(e) => onChange(index, "discount_value", e.target.value)}
+                            placeholder={tier.discount_type === "nominal" ? "1000" : "10"}
+                            disabled={saving}
+                        />
+
+                        <label className="flex h-12 items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm font-black text-slate-700">
+                            <input
+                                type="checkbox"
+                                checked={tier.is_active !== false}
+                                onChange={(e) => onChange(index, "is_active", e.target.checked)}
+                                disabled={saving}
+                                className="h-4 w-4"
+                            />
+                            Aktif
+                        </label>
+
+                        <button
+                            type="button"
+                            onClick={() => onRemove(index)}
+                            disabled={saving || safeTiers.length <= 1}
+                            className="h-12 rounded-2xl bg-red-50 px-4 text-xs font-black text-red-700 ring-1 ring-red-100 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            Hapus
+                        </button>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function DiscountTierList({ tiers }) {
+    const safeTiers = Array.isArray(tiers) ? tiers : [];
+
+    if (safeTiers.length === 0) {
+        return <span className="text-sm font-semibold text-slate-400">-</span>;
+    }
+
+    return (
+        <div className="space-y-1">
+            {safeTiers.slice(0, 4).map((tier, index) => (
+                <div key={tier.id || index} className="text-xs font-bold text-slate-500">
+                    <span className="font-black text-slate-950">
+                        {tier.min_qty}
+                        {tier.max_qty ? `-${tier.max_qty}` : "+"}
+                    </span>{" "}
+                    diskon {formatDiscountValue(tier)}
+                    {tier.is_active === false && (
+                        <span className="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-black text-slate-400">
+                            Nonaktif
+                        </span>
+                    )}
+                </div>
+            ))}
+
+            {safeTiers.length > 4 && (
+                <div className="text-xs font-black text-slate-400">
+                    +{safeTiers.length - 4} tier lain
+                </div>
+            )}
         </div>
     );
 }
@@ -1332,6 +1667,30 @@ function getBundleDetails(row) {
     }
 
     return [];
+}
+
+function getDiscountTiers(row) {
+    if (Array.isArray(row.discount_tiers)) {
+        return row.discount_tiers;
+    }
+
+    if (Array.isArray(row.discountTiers)) {
+        return row.discountTiers;
+    }
+
+    return [];
+}
+
+function formatDiscountValue(tier) {
+    const value = Number(tier.discount_value || 0);
+
+    if (tier.discount_type === "nominal") {
+        return formatRupiah(value);
+    }
+
+    return `${new Intl.NumberFormat("id-ID", {
+        maximumFractionDigits: 2,
+    }).format(value)}%`;
 }
 
 function formatRupiah(value) {

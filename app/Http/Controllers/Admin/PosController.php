@@ -119,7 +119,7 @@ class PosController extends Controller
         $rows = EventCart::query()
             ->with([
                 'event:id,nama_event,alamat_event',
-                'details:id,event_carts_id,produk_price_id,qty',
+                'details:id,event_carts_id,produk_price_id,qty,manual_discount_type,manual_discount_value',
                 'details.produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
                 'details.produkPrice.produk:id,nama_produk,product_number,code_gs1',
                 'details.produkPrice.bundleDetails:id,produk_price_id,produk_id,qty',
@@ -374,10 +374,15 @@ class PosController extends Controller
 
         $validated = $request->validate([
             'qty' => ['required', 'integer', 'min:1'],
+            'manual_discount_type' => ['nullable', 'string', 'in:none,percent,nominal'],
+            'manual_discount_value' => ['nullable', 'numeric', 'min:0'],
         ], [
             'qty.required' => 'Qty wajib diisi.',
             'qty.integer' => 'Qty harus berupa angka bulat.',
             'qty.min' => 'Qty minimal 1.',
+            'manual_discount_type.in' => 'Tipe diskon manual tidak valid.',
+            'manual_discount_value.numeric' => 'Nilai diskon manual harus berupa angka.',
+            'manual_discount_value.min' => 'Nilai diskon manual tidak boleh kurang dari 0.',
         ]);
 
         return DB::transaction(function () use ($cartId, $detailId, $validated) {
@@ -429,9 +434,29 @@ class PosController extends Controller
                 ], 422);
             }
 
-            $detail->update([
-                'qty' => $nextQty,
-            ]);
+            $manualDiscountType = $validated['manual_discount_type'] ?? $detail->manual_discount_type ?? null;
+            $manualDiscountValue = array_key_exists('manual_discount_value', $validated)
+                ? (float) ($validated['manual_discount_value'] ?? 0)
+                : (float) ($detail->manual_discount_value ?? 0);
+
+            if ($manualDiscountType === 'none' || $manualDiscountValue <= 0) {
+                $manualDiscountType = null;
+                $manualDiscountValue = 0;
+            }
+
+            if ($manualDiscountType === 'percent' && $manualDiscountValue > 100) {
+                return response()->json([
+                    'message' => 'Diskon manual persen maksimal 100%.',
+                    'errors' => [
+                        'manual_discount_value' => ['Diskon manual persen maksimal 100%.'],
+                    ],
+                ], 422);
+            }
+
+            $detail->qty = $nextQty;
+            $detail->manual_discount_type = $manualDiscountType;
+            $detail->manual_discount_value = $manualDiscountValue;
+            $detail->save();
 
             return response()->json([
                 'success' => true,
@@ -629,9 +654,8 @@ class PosController extends Controller
                 ], 422);
             }
 
-            $totalAmount = $cart->details->sum(function ($detail) {
-                return (float) ($detail->produkPrice->harga_produk ?? 0) * (int) $detail->qty;
-            });
+            $cart = $this->appendCartSummary($cart);
+            $totalAmount = (float) ($cart->total_amount ?? 0);
 
             $inputPaidAmount = (float) $validated['paid_amount'];
             $requestedPaymentType = $validated['payment_type'] ?? self::PAYMENT_TYPE_LUNAS;
@@ -694,9 +718,12 @@ class PosController extends Controller
                 $payment->save();
             }
 
-            $cart->update([
-                'status' => self::STATUS_PAID,
-            ]);
+           EventCart::query()
+    ->where('id', $cart->id)
+    ->update([
+        'status' => self::STATUS_PAID,
+        'updated_at' => now(),
+    ]);
 
             $loadedCart = $this->loadCart($cart->id);
 
@@ -716,7 +743,7 @@ class PosController extends Controller
         $cart = EventCart::query()
             ->with([
                 'event:id,nama_event,alamat_event,valid_from,valid_until',
-                'details:id,event_carts_id,produk_price_id,qty',
+                'details:id,event_carts_id,produk_price_id,qty,manual_discount_type,manual_discount_value',
                 'details.produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
                 'details.produkPrice.produk:id,nama_produk,product_number,code_gs1',
                 'details.produkPrice.bundleDetails:id,produk_price_id,produk_id,qty',
@@ -733,17 +760,25 @@ class PosController extends Controller
     private function appendCartSummary(EventCart $cart)
     {
         $items = $cart->details->map(function ($detail) use ($cart) {
-            $price = (float) ($detail->produkPrice->harga_produk ?? 0);
             $qty = (int) $detail->qty;
-            $subtotal = $price * $qty;
+            $pricing = $this->calculateLinePricing($detail->produkPrice, $qty, $detail);
 
             $stock = $this->getStockSummary(
                 $cart->event_id,
                 $detail->produk_price_id
             );
 
-            $detail->price_amount = $price;
-            $detail->subtotal_amount = $subtotal;
+            $detail->base_price_amount = $pricing['base_price_amount'];
+            $detail->price_amount = $pricing['price_amount'];
+            $detail->subtotal_amount = $pricing['subtotal_amount'];
+            $detail->discount_source = $pricing['discount_source'];
+            $detail->discount_type = $pricing['discount_type'];
+            $detail->discount_value = $pricing['discount_value'];
+            $detail->discount_amount_per_unit = $pricing['discount_amount_per_unit'];
+            $detail->discount_total_amount = $pricing['discount_total_amount'];
+            $detail->discount_label = $pricing['discount_label'];
+            $detail->applied_discount_tier = $pricing['applied_discount_tier'];
+            $detail->can_manual_discount = $pricing['discount_source'] !== 'price_tier';
             $detail->stock_masuk = $stock['stock_masuk'];
             $detail->stock_terpakai = $stock['stock_terpakai'];
             $detail->stock_terakhir = $stock['stock_terakhir'];
@@ -783,7 +818,8 @@ class PosController extends Controller
             $produk = $produkPrice?->produk;
             $isBundle = $produkPrice && $this->isBundlePrice($produkPrice);
 
-            $price = (float) ($detail->price_amount ?? $produkPrice?->harga_produk ?? 0);
+            $basePrice = (float) ($detail->base_price_amount ?? $produkPrice?->harga_produk ?? 0);
+            $price = (float) ($detail->price_amount ?? $basePrice);
             $qty = (int) $detail->qty;
             $subtotal = (float) ($detail->subtotal_amount ?? ($price * $qty));
 
@@ -810,8 +846,15 @@ class PosController extends Controller
                 'product_number' => $isBundle ? 'BUNDLE' : ($produk?->product_number ?? '-'),
                 'code_gs1' => $isBundle ? '-' : ($produk?->code_gs1 ?? '-'),
                 'qty' => $qty,
+                'harga_awal' => $basePrice,
                 'harga' => $price,
                 'subtotal' => $subtotal,
+                'discount_source' => $detail->discount_source ?? 'none',
+                'discount_type' => $detail->discount_type ?? null,
+                'discount_value' => (float) ($detail->discount_value ?? 0),
+                'discount_amount_per_unit' => (float) ($detail->discount_amount_per_unit ?? 0),
+                'discount_total_amount' => (float) ($detail->discount_total_amount ?? 0),
+                'discount_label' => $detail->discount_label ?? null,
                 'bundle_details' => $bundleDetails,
                 'bundleDetails' => $bundleDetails,
             ];
@@ -854,6 +897,153 @@ class PosController extends Controller
             'items' => $items,
             'printed_at' => now()->format('Y-m-d H:i:s'),
         ];
+    }
+
+    private function calculateLinePricing(?ProdukPrice $produkPrice, int $qty, ?EventCartDetail $detail = null): array
+    {
+        $qty = max((int) $qty, 1);
+        $basePrice = (float) ($produkPrice?->harga_produk ?? 0);
+        $discountSource = 'none';
+        $discountType = null;
+        $discountValue = 0.0;
+        $discountAmountPerUnit = 0.0;
+        $discountLabel = null;
+        $appliedTier = null;
+
+        if ($produkPrice) {
+            $tier = $this->getProdukPriceDiscountForQty($produkPrice->id, $qty);
+
+            if ($tier) {
+                $discountSource = 'price_tier';
+                $discountType = $tier->discount_type;
+                $discountValue = (float) $tier->discount_value;
+                $discountAmountPerUnit = $this->calculateDiscountAmount($basePrice, $discountType, $discountValue);
+                $discountLabel = $this->formatDiscountLabel('Diskon Qty', $discountType, $discountValue, (int) $tier->min_qty, $tier->max_qty !== null ? (int) $tier->max_qty : null);
+                $appliedTier = [
+                    'id' => $tier->id,
+                    'min_qty' => (int) $tier->min_qty,
+                    'max_qty' => $tier->max_qty !== null ? (int) $tier->max_qty : null,
+                    'discount_type' => $tier->discount_type,
+                    'discount_value' => (float) $tier->discount_value,
+                ];
+            }
+        }
+
+        if ($discountSource !== 'price_tier' && $detail) {
+            $manualType = $detail->manual_discount_type ?: null;
+            $manualValue = (float) ($detail->manual_discount_value ?? 0);
+
+            if (in_array($manualType, ['percent', 'nominal'], true) && $manualValue > 0) {
+                $discountSource = 'manual';
+                $discountType = $manualType;
+                $discountValue = $manualValue;
+                $discountAmountPerUnit = $this->calculateDiscountAmount($basePrice, $discountType, $discountValue);
+                $discountLabel = $this->formatDiscountLabel('Diskon Manual', $discountType, $discountValue);
+            }
+        }
+
+        $discountAmountPerUnit = min($discountAmountPerUnit, $basePrice);
+        $finalPrice = max($basePrice - $discountAmountPerUnit, 0);
+        $subtotal = $finalPrice * $qty;
+
+        return [
+            'base_price_amount' => $basePrice,
+            'price_amount' => $finalPrice,
+            'subtotal_amount' => $subtotal,
+            'discount_source' => $discountSource,
+            'discount_type' => $discountType,
+            'discount_value' => $discountValue,
+            'discount_amount_per_unit' => $discountAmountPerUnit,
+            'discount_total_amount' => $discountAmountPerUnit * $qty,
+            'discount_label' => $discountLabel,
+            'applied_discount_tier' => $appliedTier,
+        ];
+    }
+
+    private function calculateDiscountAmount(float $basePrice, ?string $discountType, float $discountValue): float
+    {
+        if ($basePrice <= 0 || $discountValue <= 0) {
+            return 0;
+        }
+
+        if ($discountType === 'percent') {
+            return round($basePrice * (min($discountValue, 100) / 100), 2);
+        }
+
+        if ($discountType === 'nominal') {
+            return min($discountValue, $basePrice);
+        }
+
+        return 0;
+    }
+
+    private function getProdukPriceDiscountForQty(string $produkPriceId, int $qty): ?object
+    {
+        if (!$this->discountTableExists()) {
+            return null;
+        }
+
+        return DB::table('produk_price_discounts')
+            ->where('produk_price_id', $produkPriceId)
+            ->where('is_active', true)
+            ->whereNull('deleted_at')
+            ->where('min_qty', '<=', $qty)
+            ->where(function ($query) use ($qty) {
+                $query->whereNull('max_qty')
+                    ->orWhere('max_qty', '>=', $qty);
+            })
+            ->orderByDesc('min_qty')
+            ->first();
+    }
+
+    private function getProdukPriceDiscountTiers(string $produkPriceId)
+    {
+        if (!$this->discountTableExists()) {
+            return collect();
+        }
+
+        return DB::table('produk_price_discounts')
+            ->where('produk_price_id', $produkPriceId)
+            ->whereNull('deleted_at')
+            ->orderBy('min_qty')
+            ->get()
+            ->map(fn ($tier) => [
+                'id' => $tier->id,
+                'min_qty' => (int) $tier->min_qty,
+                'max_qty' => $tier->max_qty !== null ? (int) $tier->max_qty : null,
+                'discount_type' => $tier->discount_type,
+                'discount_value' => (float) $tier->discount_value,
+                'is_active' => (bool) $tier->is_active,
+            ])
+            ->values();
+    }
+
+    private function discountTableExists(): bool
+    {
+        static $exists = null;
+
+        if ($exists === null) {
+            $exists = \Illuminate\Support\Facades\Schema::hasTable('produk_price_discounts');
+        }
+
+        return $exists;
+    }
+
+    private function formatDiscountLabel(string $prefix, ?string $discountType, float $discountValue, ?int $minQty = null, ?int $maxQty = null): string
+    {
+        $value = $discountType === 'percent'
+            ? rtrim(rtrim(number_format($discountValue, 2, ',', '.'), '0'), ',') . '%'
+            : 'Rp ' . number_format($discountValue, 0, ',', '.');
+
+        $range = '';
+
+        if ($minQty !== null) {
+            $range = $maxQty !== null
+                ? " ({$minQty}-{$maxQty})"
+                : " (≥{$minQty})";
+        }
+
+        return trim($prefix . $range . ' ' . $value);
     }
 
     private function getCartType(EventCart $cart): string
@@ -1163,6 +1353,9 @@ class PosController extends Controller
                     'product_number' => $produk?->product_number ?? '-',
                     'code_gs1' => $produk?->code_gs1 ?? '-',
                 ],
+
+            'discount_tiers' => $this->getProdukPriceDiscountTiers($produkPrice->id),
+            'discountTiers' => $this->getProdukPriceDiscountTiers($produkPrice->id),
 
             'bundle_details' => $bundleDetails,
             'bundleDetails' => $bundleDetails,

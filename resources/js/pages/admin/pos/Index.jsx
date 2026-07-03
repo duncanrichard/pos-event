@@ -521,12 +521,21 @@ export default function PosIndexPage() {
         }
     };
 
-    const updateQty = async (detail, qty) => {
+    const updateQty = async (detail, qty, discountPayload = {}) => {
         if (!cart?.id || !isDraftCart) return;
 
         const nextQty = Number(qty);
 
-        if (nextQty < 1) return;
+        if (!Number.isFinite(nextQty) || nextQty < 1) return;
+
+        const payload = {
+            qty: nextQty,
+            ...discountPayload,
+        };
+
+        if (payload.manual_discount_type === "none") {
+            payload.manual_discount_value = 0;
+        }
 
         setSaving(true);
         setError("");
@@ -534,9 +543,7 @@ export default function PosIndexPage() {
         try {
             const response = await axios.patch(
                 `/admin/pos/cart/${cart.id}/item/${detail.id}`,
-                {
-                    qty: nextQty,
-                }
+                payload
             );
 
             setCart(response.data.data);
@@ -1217,20 +1224,30 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                 ? produkPrice.nama_bundle || produkPrice.display_name || "Bundle Tanpa Nama"
                                 : produk.nama_produk || "-";
 
+                            const basePrice = Number(detail.base_price_amount ?? produkPrice.harga_produk ?? detail.price_amount ?? 0);
+                            const finalPrice = Number(detail.price_amount || 0);
+                            const discountAmountPerUnit = Number(detail.discount_amount_per_unit || 0);
+                            const discountTotalAmount = Number(detail.discount_total_amount || 0);
+                            const discountSource = detail.discount_source || "none";
+                            const discountLabel = detail.discount_label || "";
+                            const canManualDiscount = detail.can_manual_discount !== false && discountSource !== "price_tier";
+                            const manualDiscountType = detail.manual_discount_type || "none";
+                            const manualDiscountValue = detail.manual_discount_value ?? "";
+
                             return (
                                 <div
                                     key={detail.id}
                                     className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
                                 >
-                                    <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex flex-wrap items-center gap-2">
-                                                <p className="truncate text-base font-black text-slate-950">
+                                    <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-center 2xl:justify-between">
+                                        <div className="min-w-0 overflow-x-auto">
+                                            <div className="flex min-w-max items-center gap-2">
+                                                <p className="whitespace-nowrap text-base font-black leading-6 text-slate-950">
                                                     {title}
                                                 </p>
 
                                                 <span
-                                                    className={`rounded-full px-2.5 py-1 text-[10px] font-black ${
+                                                    className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-black ${
                                                         isBundle
                                                             ? "bg-blue-50 text-blue-700 ring-1 ring-blue-100"
                                                             : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
@@ -1269,10 +1286,12 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                                     )}
                                                 </div>
                                             ) : (
-                                                <p className="mt-1 text-xs font-bold text-slate-400">
-                                                    PN: {produk.product_number || "-"} · GS1:{" "}
-                                                    {produk.code_gs1 || "-"}
-                                                </p>
+                                                <div className="mt-1 min-w-max">
+                                                    <p className="whitespace-nowrap text-xs font-bold text-slate-400">
+                                                        PN: {produk.product_number || "-"} · GS1:{" "}
+                                                        {produk.code_gs1 || "-"}
+                                                    </p>
+                                                </div>
                                             )}
 
                                             <div className="mt-3 flex flex-wrap gap-2">
@@ -1284,7 +1303,7 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                                     />
                                                 ) : (
                                                     <StockBadge
-                                                        label={isBundle ? "Bundle Tersedia" : "Stok Terakhir"}
+                                                        label={isBundle ? "Bundle Tersedia" : "Stok"}
                                                         value={
                                                             detail.stock_terakhir ??
                                                             produkPrice.stock_terakhir ??
@@ -1293,75 +1312,109 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                                         type={isBundle ? "blue" : "emerald"}
                                                     />
                                                 )}
-                                            </div>
 
-                                            <p className="mt-3 text-sm font-black text-emerald-600">
-                                                {formatRupiah(detail.price_amount)}
-                                            </p>
+                                                {discountAmountPerUnit > 0 ? (
+                                                    <DiscountBadge
+                                                        source={discountSource}
+                                                        label={discountLabel}
+                                                        total={discountTotalAmount}
+                                                    />
+                                                ) : null}
+                                            </div>
                                         </div>
 
-                                        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
-                                            <div className="flex items-center gap-2">
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        updateQty(detail, detail.qty - 1)
-                                                    }
-                                                    disabled={
-                                                        saving ||
-                                                        !isDraftCart ||
-                                                        detail.qty <= 1
-                                                    }
-                                                    className="h-10 w-10 rounded-xl border border-slate-200 bg-white text-lg font-black text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-                                                >
-                                                    -
-                                                </button>
+                                        <div className="min-w-0 overflow-x-auto">
+                                            <div className="flex min-w-max items-center gap-3 2xl:justify-end">
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateQty(detail, detail.qty - 1)}
+                                                        disabled={
+                                                            saving ||
+                                                            !isDraftCart ||
+                                                            detail.qty <= 1
+                                                        }
+                                                        className="h-10 w-10 rounded-xl border border-slate-200 bg-white text-lg font-black text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+                                                    >
+                                                        -
+                                                    </button>
 
-                                                <input
-                                                    type="number"
-                                                    value={detail.qty}
-                                                    onChange={(e) =>
-                                                        updateQty(detail, e.target.value)
-                                                    }
-                                                    disabled={!isDraftCart}
-                                                    className="h-10 w-16 rounded-xl border border-slate-200 text-center text-sm font-black text-slate-950 disabled:bg-slate-100"
+                                                    <input
+                                                        type="number"
+                                                        value={detail.qty}
+                                                        onChange={(e) => updateQty(detail, e.target.value)}
+                                                        disabled={!isDraftCart}
+                                                        className="h-10 w-16 rounded-xl border border-slate-200 text-center text-sm font-black text-slate-950 disabled:bg-slate-100"
+                                                    />
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateQty(detail, detail.qty + 1)}
+                                                        disabled={saving || !isDraftCart}
+                                                        className="h-10 w-10 rounded-xl bg-slate-950 text-lg font-black text-white hover:bg-slate-800 disabled:opacity-40"
+                                                    >
+                                                        +
+                                                    </button>
+                                                </div>
+
+                                                <div className="min-w-[150px] rounded-2xl bg-slate-50 px-4 py-3 text-left ring-1 ring-slate-100">
+                                                    <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">
+                                                        Harga Satuan
+                                                    </p>
+                                                    {discountAmountPerUnit > 0 && basePrice > finalPrice ? (
+                                                        <p className="mt-1 whitespace-nowrap text-xs font-black text-slate-400 line-through">
+                                                            {formatRupiah(basePrice)}
+                                                        </p>
+                                                    ) : null}
+                                                    <p className="mt-1 whitespace-nowrap text-base font-black text-emerald-600">
+                                                        {formatRupiah(finalPrice)}
+                                                    </p>
+                                                    {discountAmountPerUnit > 0 ? (
+                                                        <p className="mt-1 whitespace-nowrap text-[10px] font-black text-emerald-700">
+                                                            Hemat {formatRupiah(discountAmountPerUnit)}/pcs
+                                                        </p>
+                                                    ) : null}
+                                                </div>
+
+                                                <ManualDiscountControl
+                                                    detail={detail}
+                                                    saving={saving}
+                                                    disabled={!isDraftCart || !canManualDiscount}
+                                                    manualDiscountType={manualDiscountType}
+                                                    manualDiscountValue={manualDiscountValue}
+                                                    updateQty={updateQty}
                                                 />
 
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        updateQty(detail, detail.qty + 1)
-                                                    }
-                                                    disabled={saving || !isDraftCart}
-                                                    className="h-10 w-10 rounded-xl bg-slate-950 text-lg font-black text-white hover:bg-slate-800 disabled:opacity-40"
-                                                >
-                                                    +
-                                                </button>
-                                            </div>
+                                                <div className="min-w-[128px] rounded-2xl bg-slate-50 px-4 py-3 text-left ring-1 ring-slate-100">
+                                                    <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">
+                                                        Subtotal
+                                                    </p>
+                                                    <p className="mt-1 whitespace-nowrap text-base font-black text-slate-950">
+                                                        {formatRupiah(detail.subtotal_amount)}
+                                                    </p>
+                                                </div>
 
-                                            <div className="min-w-[130px] text-right">
-                                                <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">
-                                                    Subtotal
-                                                </p>
-                                                <p className="text-base font-black text-slate-950">
-                                                    {formatRupiah(detail.subtotal_amount)}
-                                                </p>
+                                                {isDraftCart ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => deleteItem(detail)}
+                                                        disabled={saving}
+                                                        title="Hapus produk"
+                                                        aria-label="Hapus produk"
+                                                        className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-red-50 text-red-700 ring-1 ring-red-100 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                                    >
+                                                        <TrashIcon className="h-5 w-5" />
+                                                    </button>
+                                                ) : (
+                                                    <span
+                                                        title="Item terkunci"
+                                                        aria-label="Item terkunci"
+                                                        className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-500 ring-1 ring-slate-200"
+                                                    >
+                                                        <TrashIcon className="h-5 w-5" />
+                                                    </span>
+                                                )}
                                             </div>
-
-                                            {isDraftCart ? (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => deleteItem(detail)}
-                                                    disabled={saving}
-                                                    className="rounded-xl bg-red-50 px-3 py-2 text-xs font-black text-red-700 ring-1 ring-red-100 hover:bg-red-100 disabled:opacity-60"
-                                                >
-                                                    Hapus
-                                                </button>
-                                            ) : (
-                                                <span className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-500">
-                                                    Terkunci
-                                                </span>
-                                            )}
                                         </div>
                                     </div>
                                 </div>
@@ -1371,6 +1424,103 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                 )}
             </div>
         </div>
+    );
+}
+
+function ManualDiscountControl({
+    detail,
+    saving,
+    disabled,
+    manualDiscountType,
+    manualDiscountValue,
+    updateQty,
+}) {
+    const [localType, setLocalType] = useState(manualDiscountType || "none");
+    const [localValue, setLocalValue] = useState(manualDiscountValue ?? "");
+
+    useEffect(() => {
+        setLocalType(manualDiscountType || "none");
+        setLocalValue(manualDiscountValue ?? "");
+    }, [detail.id, manualDiscountType, manualDiscountValue]);
+
+    const submitManualDiscount = (nextType = localType, nextValue = localValue) => {
+        if (disabled || saving) return;
+
+        updateQty(detail, detail.qty, {
+            manual_discount_type: nextType || "none",
+            manual_discount_value: nextType === "none" ? 0 : Number(nextValue || 0),
+        });
+    };
+
+    return (
+        <div
+            className={`min-w-[230px] rounded-2xl px-4 py-3 text-left ring-1 ${
+                disabled
+                    ? "bg-slate-50 text-slate-400 ring-slate-100"
+                    : "bg-amber-50 text-amber-800 ring-amber-100"
+            }`}
+        >
+            <p className="text-[10px] font-black uppercase tracking-wide">
+                Diskon Manual
+            </p>
+
+            {disabled ? (
+                <p className="mt-2 text-xs font-black">
+                    Otomatis dari diskon qty
+                </p>
+            ) : (
+                <div className="mt-2 flex items-center gap-2">
+                    <select
+                        value={localType}
+                        onChange={(e) => {
+                            const nextType = e.target.value;
+                            setLocalType(nextType);
+                            submitManualDiscount(nextType, localValue);
+                        }}
+                        disabled={saving}
+                        className="h-9 rounded-xl border border-amber-200 bg-white px-2 text-xs font-black text-slate-700 outline-none disabled:opacity-60"
+                    >
+                        <option value="none">Tanpa</option>
+                        <option value="percent">%</option>
+                        <option value="nominal">Rp</option>
+                    </select>
+
+                    <input
+                        type="number"
+                        min="0"
+                        value={localValue}
+                        onChange={(e) => setLocalValue(e.target.value)}
+                        onBlur={() => submitManualDiscount(localType, localValue)}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                                e.preventDefault();
+                                submitManualDiscount(localType, localValue);
+                            }
+                        }}
+                        disabled={saving || localType === "none"}
+                        placeholder="0"
+                        className="h-9 w-24 rounded-xl border border-amber-200 bg-white px-3 text-xs font-black text-slate-700 outline-none disabled:opacity-60"
+                    />
+                </div>
+            )}
+        </div>
+    );
+}
+
+function DiscountBadge({ source, label, total }) {
+    const isAuto = source === "price_tier";
+
+    return (
+        <span
+            className={`inline-flex rounded-2xl px-3 py-2 text-xs font-black ring-1 ${
+                isAuto
+                    ? "bg-blue-50 text-blue-700 ring-blue-100"
+                    : "bg-amber-50 text-amber-700 ring-amber-100"
+            }`}
+        >
+            {label || (isAuto ? "Diskon Qty" : "Diskon Manual")}
+            {Number(total || 0) > 0 ? ` · Hemat ${formatRupiah(total)}` : ""}
+        </span>
     );
 }
 
@@ -2042,6 +2192,28 @@ function Alert({ type, message }) {
     );
 }
 
+
+function TrashIcon({ className = "h-5 w-5" }) {
+    return (
+        <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={className}
+            aria-hidden="true"
+        >
+            <path d="M3 6h18" />
+            <path d="M8 6V4h8v2" />
+            <path d="M19 6l-1 14H6L5 6" />
+            <path d="M10 11v6" />
+            <path d="M14 11v6" />
+        </svg>
+    );
+}
+
 function CartIcon({ className = "h-5 w-5" }) {
     return (
         <svg
@@ -2265,7 +2437,10 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
         .map((item) => {
             const qty = Number(item.qty || 0);
             const price = Number(item.harga || 0);
+            const basePrice = Number(item.harga_awal || price || 0);
             const subtotal = Number(item.subtotal || 0);
+            const discountLabel = item.discount_label || "";
+            const discountAmountPerUnit = Number(item.discount_amount_per_unit || 0);
 
             const isBundle = item.tipe_harga === "bundle";
             const bundleDetails = Array.isArray(item.bundle_details) ? item.bundle_details : [];
@@ -2292,6 +2467,7 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
                         <span>${qty} x ${formatRupiah(price)}</span>
                         <span>${isBundle ? "Bundle" : ""}</span>
                     </div>
+                    ${discountAmountPerUnit > 0 ? `<div class="item-bottom"><span>${escapeHtml(discountLabel || "Diskon")}</span><span>Harga awal ${formatRupiah(basePrice)}</span></div>` : ""}
                     ${bundleHtml}
                 </div>
             `;

@@ -22,10 +22,11 @@ class ProdukPrice extends Model
         'produk_id',
         'event_id',
 
-        // Untuk membedakan harga produk biasa atau bundle
-        'tipe_harga',     // single / bundle
-        'nama_bundle',    // wajib jika tipe_harga = bundle
+        // single / bundle
+        'tipe_harga',
+        'nama_bundle',
 
+        // Harga dasar sebelum diskon qty
         'harga_produk',
     ];
 
@@ -66,6 +67,13 @@ class ProdukPrice extends Model
             ->withTimestamps();
     }
 
+    public function discounts()
+    {
+        return $this->hasMany(ProdukPriceDiscount::class, 'produk_price_id')
+            ->where('is_active', true)
+            ->orderBy('min_qty');
+    }
+
     /*
     |--------------------------------------------------------------------------
     | Helpers
@@ -89,5 +97,55 @@ class ProdukPrice extends Model
         }
 
         return $this->produk?->nama_produk ?: 'Produk Tanpa Nama';
+    }
+
+    public function getDiscountForQty(int $qty): ?ProdukPriceDiscount
+    {
+        $qty = max($qty, 1);
+
+        return $this->discounts
+            ->first(function ($discount) use ($qty) {
+                $minQty = (int) $discount->min_qty;
+                $maxQty = $discount->max_qty !== null ? (int) $discount->max_qty : null;
+
+                return $qty >= $minQty && ($maxQty === null || $qty <= $maxQty);
+            });
+    }
+
+    public function getDiscountAmountForQty(int $qty): float
+    {
+        $basePrice = (float) $this->harga_produk;
+        $discount = $this->getDiscountForQty($qty);
+
+        if (!$discount) {
+            return 0;
+        }
+
+        $discountValue = (float) $discount->discount_value;
+
+        if ($discount->discount_type === 'percent') {
+            return round($basePrice * ($discountValue / 100), 2);
+        }
+
+        if ($discount->discount_type === 'nominal') {
+            return min($discountValue, $basePrice);
+        }
+
+        return 0;
+    }
+
+    public function getFinalUnitPriceForQty(int $qty): float
+    {
+        $basePrice = (float) $this->harga_produk;
+        $discountAmount = $this->getDiscountAmountForQty($qty);
+
+        return max($basePrice - $discountAmount, 0);
+    }
+
+    public function getSubtotalForQty(int $qty): float
+    {
+        $qty = max($qty, 1);
+
+        return $this->getFinalUnitPriceForQty($qty) * $qty;
     }
 }

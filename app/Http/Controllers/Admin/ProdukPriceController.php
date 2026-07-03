@@ -13,6 +13,7 @@ class ProdukPriceController extends Controller
 {
     private string $produkPriceTable = 'produk_price';
     private string $bundleDetailTable = 'produk_price_details';
+    private string $discountTable = 'produk_price_discounts';
 
     public function index(Request $request)
     {
@@ -127,6 +128,8 @@ class ProdukPriceController extends Controller
 
     public function store(Request $request)
     {
+        $this->normalizeRequest($request);
+
         $validator = $this->validator($request);
 
         if ($validator->fails()) {
@@ -162,6 +165,8 @@ class ProdukPriceController extends Controller
             if ($validated['tipe_harga'] === 'bundle') {
                 $this->syncBundleDetails($id, $validated['items'] ?? []);
             }
+
+            $this->syncDiscountTiers($id, $validated['discount_tiers'] ?? []);
 
             DB::commit();
 
@@ -202,6 +207,8 @@ class ProdukPriceController extends Controller
 
     public function update(Request $request, string $id)
     {
+        $this->normalizeRequest($request);
+
         $existing = DB::table($this->produkPriceTable)
             ->where('id', $id)
             ->whereNull('deleted_at')
@@ -256,6 +263,8 @@ class ProdukPriceController extends Controller
                     ]);
             }
 
+            $this->syncDiscountTiers($id, $validated['discount_tiers'] ?? []);
+
             DB::commit();
 
             return response()->json([
@@ -300,6 +309,14 @@ class ProdukPriceController extends Controller
                     'updated_at' => now(),
                 ]);
 
+            DB::table($this->discountTable)
+                ->where('produk_price_id', $id)
+                ->whereNull('deleted_at')
+                ->update([
+                    'deleted_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
             DB::table($this->produkPriceTable)
                 ->where('id', $id)
                 ->update([
@@ -323,6 +340,35 @@ class ProdukPriceController extends Controller
                 'error' => config('app.debug') ? $e->getMessage() : null,
             ], 500);
         }
+    }
+
+    private function normalizeRequest(Request $request): void
+    {
+        $tipeHarga = $request->input('tipe_harga') === 'bundle' ? 'bundle' : 'single';
+
+        if ($tipeHarga === 'single') {
+            // Mode single tidak membutuhkan isi bundle. Ini mencegah validasi
+            // "Isi bundle minimal 1 produk" muncul karena sisa state/form lama.
+            $request->merge([
+                'tipe_harga' => 'single',
+                'nama_bundle' => null,
+                'items' => [],
+            ]);
+
+            return;
+        }
+
+        $items = $request->input('items', []);
+
+        if (!is_array($items)) {
+            $items = [];
+        }
+
+        $request->merge([
+            'tipe_harga' => 'bundle',
+            'produk_id' => null,
+            'items' => $items,
+        ]);
     }
 
     private function validator(Request $request)
@@ -356,19 +402,44 @@ class ProdukPriceController extends Controller
             ],
             'items' => [
                 'nullable',
-                'required_if:tipe_harga,bundle',
                 'array',
-                'min:1',
             ],
             'items.*.produk_id' => [
-                'required_if:tipe_harga,bundle',
+                'nullable',
                 'uuid',
                 Rule::exists('produk', 'id')->whereNull('deleted_at'),
             ],
             'items.*.qty' => [
-                'required_if:tipe_harga,bundle',
+                'nullable',
                 'integer',
                 'min:1',
+            ],
+            'discount_tiers' => [
+                'nullable',
+                'array',
+            ],
+            'discount_tiers.*.min_qty' => [
+                'required_with:discount_tiers',
+                'integer',
+                'min:1',
+            ],
+            'discount_tiers.*.max_qty' => [
+                'nullable',
+                'integer',
+                'min:1',
+            ],
+            'discount_tiers.*.discount_type' => [
+                'required_with:discount_tiers',
+                Rule::in(['percent', 'nominal']),
+            ],
+            'discount_tiers.*.discount_value' => [
+                'required_with:discount_tiers',
+                'numeric',
+                'min:0',
+            ],
+            'discount_tiers.*.is_active' => [
+                'nullable',
+                'boolean',
             ],
         ], [
             'tipe_harga.required' => 'Tipe harga wajib dipilih.',
@@ -400,7 +471,59 @@ class ProdukPriceController extends Controller
             'items.*.qty.required_if' => 'Qty bundle wajib diisi.',
             'items.*.qty.integer' => 'Qty bundle harus angka bulat.',
             'items.*.qty.min' => 'Qty bundle minimal 1.',
-        ]);
+
+            'discount_tiers.array' => 'Format diskon bertingkat tidak valid.',
+            'discount_tiers.*.min_qty.required_with' => 'Minimal qty diskon wajib diisi.',
+            'discount_tiers.*.min_qty.integer' => 'Minimal qty diskon harus angka bulat.',
+            'discount_tiers.*.min_qty.min' => 'Minimal qty diskon minimal 1.',
+            'discount_tiers.*.max_qty.integer' => 'Maksimal qty diskon harus angka bulat.',
+            'discount_tiers.*.max_qty.min' => 'Maksimal qty diskon minimal 1.',
+            'discount_tiers.*.discount_type.required_with' => 'Tipe diskon wajib dipilih.',
+            'discount_tiers.*.discount_type.in' => 'Tipe diskon tidak valid.',
+            'discount_tiers.*.discount_value.required_with' => 'Nilai diskon wajib diisi.',
+            'discount_tiers.*.discount_value.numeric' => 'Nilai diskon harus berupa angka.',
+            'discount_tiers.*.discount_value.min' => 'Nilai diskon tidak boleh kurang dari 0.',
+        ])->after(function ($validator) use ($request) {
+            if ($request->input('tipe_harga') === 'bundle') {
+                $items = $request->input('items', []);
+                $validItems = collect(is_array($items) ? $items : [])
+                    ->filter(function ($item) {
+                        return !empty($item['produk_id']) && (int) ($item['qty'] ?? 0) > 0;
+                    })
+                    ->count();
+
+                if ($validItems < 1) {
+                    $validator->errors()->add('items', 'Isi bundle minimal 1 produk.');
+                }
+            }
+
+            $tiers = $request->input('discount_tiers', []);
+
+            if (!is_array($tiers)) {
+                return;
+            }
+
+            foreach ($tiers as $index => $tier) {
+                $minQty = (int) ($tier['min_qty'] ?? 0);
+                $maxQty = isset($tier['max_qty']) && $tier['max_qty'] !== ''
+                    ? (int) $tier['max_qty']
+                    : null;
+
+                if ($maxQty !== null && $maxQty < $minQty) {
+                    $validator->errors()->add(
+                        "discount_tiers.$index.max_qty",
+                        'Maksimal qty harus kosong atau lebih besar/sama dengan minimal qty.'
+                    );
+                }
+
+                if (($tier['discount_type'] ?? null) === 'percent' && (float) ($tier['discount_value'] ?? 0) > 100) {
+                    $validator->errors()->add(
+                        "discount_tiers.$index.discount_value",
+                        'Diskon persen maksimal 100%.'
+                    );
+                }
+            }
+        });
     }
 
     private function syncBundleDetails(string $produkPriceId, array $items): void
@@ -427,6 +550,82 @@ class ProdukPriceController extends Controller
                 'updated_at' => now(),
             ]);
         }
+    }
+
+    private function syncDiscountTiers(string $produkPriceId, array $discountTiers): void
+    {
+        DB::table($this->discountTable)
+            ->where('produk_price_id', $produkPriceId)
+            ->whereNull('deleted_at')
+            ->update([
+                'deleted_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+        foreach ($discountTiers as $tier) {
+            $minQty = (int) ($tier['min_qty'] ?? 0);
+            $maxQty = isset($tier['max_qty']) && $tier['max_qty'] !== ''
+                ? (int) $tier['max_qty']
+                : null;
+
+            $discountType = $tier['discount_type'] ?? 'percent';
+            $discountValue = (float) ($tier['discount_value'] ?? 0);
+            $isActive = array_key_exists('is_active', $tier)
+                ? (bool) $tier['is_active']
+                : true;
+
+            if ($minQty < 1 || $discountValue < 0) {
+                continue;
+            }
+
+            if ($maxQty !== null && $maxQty < $minQty) {
+                continue;
+            }
+
+            if (!in_array($discountType, ['percent', 'nominal'], true)) {
+                continue;
+            }
+
+            if ($discountType === 'percent' && $discountValue > 100) {
+                continue;
+            }
+
+            DB::table($this->discountTable)->insert([
+                'id' => (string) Str::uuid(),
+                'produk_price_id' => $produkPriceId,
+                'min_qty' => $minQty,
+                'max_qty' => $maxQty,
+                'discount_type' => $discountType,
+                'discount_value' => $discountValue,
+                'is_active' => $isActive,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+    }
+
+    private function getDiscountTiers(string $produkPriceId)
+    {
+        return DB::table($this->discountTable)
+            ->where('produk_price_id', $produkPriceId)
+            ->whereNull('deleted_at')
+            ->orderBy('min_qty')
+            ->orderBy('max_qty')
+            ->get()
+            ->map(function ($tier) {
+                return [
+                    'id' => $tier->id,
+                    'produk_price_id' => $tier->produk_price_id,
+                    'min_qty' => (int) $tier->min_qty,
+                    'max_qty' => $tier->max_qty !== null ? (int) $tier->max_qty : null,
+                    'discount_type' => $tier->discount_type,
+                    'discount_value' => (float) $tier->discount_value,
+                    'is_active' => (bool) $tier->is_active,
+                    'created_at' => $tier->created_at,
+                    'updated_at' => $tier->updated_at,
+                ];
+            })
+            ->values();
     }
 
     private function getBundleDetails(string $produkPriceId)
@@ -521,6 +720,7 @@ class ProdukPriceController extends Controller
             'id' => $row->id,
             'produk_id' => $row->produk_id,
             'harga_produk' => $row->harga_produk,
+            'discount_tiers' => $this->getDiscountTiers($row->id),
             'created_at' => $row->created_at,
             'updated_at' => $row->updated_at,
             'event_id' => $row->event_id,

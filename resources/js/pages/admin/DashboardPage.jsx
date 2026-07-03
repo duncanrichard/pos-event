@@ -88,12 +88,12 @@ export default function DashboardPage() {
                             </p>
 
                             <h1 className="mt-4 max-w-4xl text-3xl font-black tracking-tight sm:text-4xl">
-                                Dashboard Operasional, Stok, Omset & Demografi POS
+                                Dashboard Operasional, Omset & Demografi Penjualan
                             </h1>
 
                             <p className="mt-4 max-w-3xl text-sm font-semibold leading-7 text-slate-300">
-                                Menampilkan data langsung dari transaksi POS, stok akhir event,
-                                produk terjual, customer, metode pembayaran, dan performa event.
+                                Menampilkan ringkasan transaksi POS, omzet, stok akhir,
+                                produk terjual, metode pembayaran, customer, dan performa event.
                             </p>
                         </div>
 
@@ -186,19 +186,68 @@ export default function DashboardPage() {
                 <StatCard title="Omset" value={formatRupiah(summary.omzet)} description="Total transaksi paid" code="OMS" />
                 <StatCard title="Transaksi Paid" value={formatNumber(summary.paid_transactions)} description={`${formatNumber(summary.total_transactions)} total transaksi`} code="TRX" />
                 <StatCard title="Produk Terjual" value={formatNumber(summary.total_qty_sold)} description="Qty dari detail POS" code="QTY" />
-                <StatCard title="Stock Akhir" value={formatNumber(stockSummary.total_stock_akhir)} description={`${formatNumber(stockSummary.total_stock_masuk)} stok masuk`} code="STK" />
+                <StatCard title="Rata-rata Transaksi" value={formatRupiah(summary.average_transaction)} description="Omset dibagi transaksi paid" code="AVG" />
             </section>
 
             <section className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-                <StatCard title="Total Event" value={formatNumber(summary.total_events)} description={`${formatNumber(summary.active_events)} berjalan`} code="EV" />
-                <StatCard title="Total Produk" value={formatNumber(summary.total_products)} description={`${formatNumber(summary.total_product_prices)} harga produk`} code="PR" />
+                <StatCard title="Stock Akhir" value={formatNumber(stockSummary.total_stock_akhir)} description={`${formatNumber(stockSummary.total_stock_masuk)} stok masuk`} code="STK" />
                 <StatCard title="Terpakai" value={formatNumber(stockSummary.total_stock_terpakai)} description={`${formatNumber(stockSummary.total_stock_paid)} paid, ${formatNumber(stockSummary.total_stock_draft)} draft`} code="OUT" />
                 <StatCard title="Sisa Tagihan" value={formatRupiah(summary.remaining_amount)} description={`${formatRupiah(summary.paid_amount)} terbayar`} code="AR" />
+                <StatCard title="Total Event" value={formatNumber(summary.total_events)} description={`${formatNumber(summary.active_events)} berjalan`} code="EV" />
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-4">
+                {(demographics.sales_overview || []).map((item) => (
+                    <SalesOverviewCard key={item.label} item={item} />
+                ))}
             </section>
 
             <section className="grid gap-6 xl:grid-cols-3">
                 <div className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm xl:col-span-2">
-                    <SectionTitle title="Demografi Stok" subtitle="Distribusi status stok berdasarkan stock akhir produk event." />
+                    <SectionTitle
+                        title="Grafik Omset Harian"
+                        subtitle="Demografi penjualan berdasarkan tanggal transaksi paid."
+                    />
+                    <BarChart
+                        items={demographics.sales_by_date || []}
+                        valueKey="omzet"
+                        valueFormatter={formatRupiah}
+                        emptyText="Belum ada data omset harian."
+                    />
+                </div>
+
+                <div className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm">
+                    <SectionTitle
+                        title="Jam Transaksi Ramai"
+                        subtitle="Distribusi transaksi paid berdasarkan jam."
+                    />
+                    <BarChart
+                        items={demographics.sales_by_hour || []}
+                        valueKey="total"
+                        valueFormatter={formatNumber}
+                        emptyText="Belum ada data jam transaksi."
+                    />
+                </div>
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-3">
+                <DemographyCard title="Metode Pembayaran" subtitle="Omset dan transaksi per metode bayar" items={demographics.payment_method || []} />
+                <DemographyCard title="Jenis Transaksi" subtitle="Pembelian dan PO" items={demographics.transaction_type || []} />
+                <DemographyCard title="Status Pembayaran" subtitle="Lunas, DP, Draft, dan status lain" items={demographics.payment_status || []} />
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-3">
+                <DemographyCard title="Tipe Customer" subtitle="Walk in vs customer bernama" items={demographics.customer_type || []} />
+                <DemographyCard title="Tipe Produk" subtitle="Single dan bundle" items={demographics.product_type || []} />
+                <div className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm">
+                    <SectionTitle title="Komposisi Event" subtitle="Status tanggal event saat ini." />
+                    <StackList items={demographics.event_status || []} valueKey="total" />
+                </div>
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-3">
+                <div className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm xl:col-span-2">
+                    <SectionTitle title="Demografi Stok" subtitle="Distribusi status stok berdasarkan stok akhir produk event." />
                     <div className="grid gap-4 md:grid-cols-3">
                         {(demographics.stock_status || []).map((item) => (
                             <DemographyItem
@@ -213,15 +262,15 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm">
-                    <SectionTitle title="Komposisi Event" subtitle="Status tanggal event saat ini." />
-                    <StackList items={demographics.event_status || []} valueKey="total" />
+                    <SectionTitle title="Ringkasan Master" subtitle="Jumlah master event dan produk." />
+                    <div className="grid gap-3">
+                        <MiniInfo label="Event Aktif" value={formatNumber(summary.active_events)} />
+                        <MiniInfo label="Event Akan Datang" value={formatNumber(summary.upcoming_events)} />
+                        <MiniInfo label="Event Terlewat" value={formatNumber(summary.expired_events)} />
+                        <MiniInfo label="Total Produk" value={formatNumber(summary.total_products)} />
+                        <MiniInfo label="Harga Produk" value={formatNumber(summary.total_product_prices)} />
+                    </div>
                 </div>
-            </section>
-
-            <section className="grid gap-6 xl:grid-cols-3">
-                <DemographyCard title="Jenis Transaksi" subtitle="Pembelian dan PO" items={demographics.transaction_type || []} />
-                <DemographyCard title="Status Pembayaran" subtitle="Lunas, DP, Draft, dan status lain" items={demographics.payment_status || []} />
-                <DemographyCard title="Tipe Customer" subtitle="Walk in vs customer bernama" items={demographics.customer_type || []} />
             </section>
 
             <section className="grid gap-6 xl:grid-cols-2">
@@ -240,7 +289,7 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm">
-                    <SectionTitle title="Produk Terjual Terbanyak" subtitle="Produk/bundle dengan qty penjualan tertinggi." />
+                    <SectionTitle title="Produk Terjual Terbanyak" subtitle="Produk atau bundle dengan qty penjualan tertinggi." />
                     <SimpleTable
                         headers={["Produk", "Tipe", "Qty", "Omset"]}
                         rows={topProducts.map((row) => [
@@ -257,12 +306,14 @@ export default function DashboardPage() {
             <section className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm">
                 <SectionTitle title="Transaksi Terbaru" subtitle="Data transaksi terbaru dari POS." />
                 <SimpleTable
-                    headers={["Invoice", "Customer", "Event", "Status", "Qty", "Total"]}
+                    headers={["Invoice", "Customer", "Event", "Jenis", "Status", "Payment", "Qty", "Total"]}
                     rows={recentTransactions.map((row) => [
                         row.no_invoice || "-",
                         row.customer || "Walk In Customer",
                         row.nama_event || "-",
+                        row.transaction_type || "-",
                         row.payment_status || row.status || "-",
+                        row.payment_method || "-",
                         formatNumber(row.total_qty),
                         formatRupiah(row.total_amount),
                     ])}
@@ -299,6 +350,20 @@ function StatCard({ title, value, description, code }) {
     );
 }
 
+function SalesOverviewCard({ item }) {
+    return (
+        <div className="rounded-[1.5rem] border border-slate-200 bg-white p-6 shadow-sm">
+            <p className="text-sm font-black text-slate-500">{item.label}</p>
+            <h3 className="mt-3 text-3xl font-black tracking-tight text-slate-950">
+                {formatNumber(item.total)}
+            </h3>
+            <p className="mt-2 text-xs font-bold text-slate-400">
+                Omset: {formatRupiah(item.omzet)}
+            </p>
+        </div>
+    );
+}
+
 function DemographyItem({ label, value, percent, width }) {
     const safeWidth = Math.max(0, Math.min(Number(width || 0), 100));
 
@@ -331,18 +396,20 @@ function DemographyCard({ title, subtitle, items }) {
 }
 
 function StackList({ items, valueKey = "total" }) {
+    const safeItems = Array.isArray(items) ? items : [];
+
     const total = Math.max(
-        items.reduce((sum, item) => sum + Number(item[valueKey] || 0), 0),
+        safeItems.reduce((sum, item) => sum + Number(item[valueKey] || 0), 0),
         1
     );
 
-    if (!items.length) {
+    if (!safeItems.length) {
         return <div className="rounded-2xl bg-slate-50 p-5 text-sm font-bold text-slate-400">Belum ada data.</div>;
     }
 
     return (
         <div className="space-y-4">
-            {items.map((item) => {
+            {safeItems.map((item) => {
                 const value = Number(item[valueKey] || 0);
                 const percent = (value / total) * 100;
 
@@ -361,6 +428,50 @@ function StackList({ items, valueKey = "total" }) {
                     </div>
                 );
             })}
+        </div>
+    );
+}
+
+function BarChart({ items, valueKey = "total", valueFormatter = formatNumber, emptyText = "Belum ada data." }) {
+    const safeItems = Array.isArray(items) ? items : [];
+    const maxValue = Math.max(...safeItems.map((item) => Number(item[valueKey] || 0)), 0);
+
+    if (!safeItems.length || maxValue <= 0) {
+        return <div className="rounded-2xl bg-slate-50 p-5 text-sm font-bold text-slate-400">{emptyText}</div>;
+    }
+
+    return (
+        <div className="space-y-4">
+            {safeItems.map((item) => {
+                const value = Number(item[valueKey] || 0);
+                const width = Math.max((value / maxValue) * 100, 4);
+
+                return (
+                    <div key={item.label}>
+                        <div className="mb-2 flex items-center justify-between gap-4 text-xs">
+                            <span className="font-black text-slate-700">{formatShortLabel(item.label)}</span>
+                            <span className="font-black text-slate-950">{valueFormatter(value)}</span>
+                        </div>
+                        <div className="h-4 overflow-hidden rounded-full bg-slate-100">
+                            <div className="h-4 rounded-full bg-slate-950" style={{ width: `${width}%` }} />
+                        </div>
+                        {item.qty !== undefined && (
+                            <p className="mt-1 text-xs font-bold text-slate-400">
+                                Qty: {formatNumber(item.qty)} | Transaksi: {formatNumber(item.total)}
+                            </p>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+function MiniInfo({ label, value }) {
+    return (
+        <div className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3">
+            <span className="text-sm font-black text-slate-600">{label}</span>
+            <span className="text-sm font-black text-slate-950">{value}</span>
         </div>
     );
 }
@@ -421,8 +532,12 @@ function renderCell(value) {
         "Belum Lunas": "bg-amber-100 text-amber-700",
         Paid: "bg-emerald-100 text-emerald-700",
         Draft: "bg-slate-100 text-slate-700",
+        "Void Carts": "bg-red-100 text-red-700",
+        "Void Transaksi": "bg-red-100 text-red-700",
         Bundle: "bg-blue-100 text-blue-700",
         Single: "bg-emerald-100 text-emerald-700",
+        PO: "bg-purple-100 text-purple-700",
+        Pembelian: "bg-slate-100 text-slate-700",
     };
 
     if (statusClass[value]) {
@@ -454,6 +569,16 @@ function formatDate(value) {
     } catch {
         return "-";
     }
+}
+
+function formatShortLabel(value) {
+    if (!value) return "-";
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        return formatDate(value);
+    }
+
+    return value;
 }
 
 function formatNumber(value) {
