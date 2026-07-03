@@ -298,7 +298,7 @@ export default function AdminPage() {
                 },
                 {
                     key: "event-inbound",
-                    label: "Event Inbound",
+                    label: "Event Stok",
                     description: "Kelola stok masuk event",
                     icon: "EI",
                     component: EventInboundIndexPage,

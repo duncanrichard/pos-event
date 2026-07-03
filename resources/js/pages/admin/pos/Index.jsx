@@ -210,6 +210,33 @@ export default function PosIndexPage() {
         : Math.max(totalAmount - paidNumber, 0);
 
     const changeAmount = Math.max(paidNumber - paymentTargetAmount, 0);
+    const selectedPaymentIsCash = isCashPaymentMethod(selectedPayment);
+
+    useEffect(() => {
+        if (!canReceivePayment || !selectedPayment) {
+            return;
+        }
+
+        const autoPaidAmount = paymentTargetAmount > 0 ? String(paymentTargetAmount) : "";
+
+        if (!selectedPaymentIsCash) {
+            setPaidAmount(autoPaidAmount);
+            return;
+        }
+
+        setPaidAmount((currentValue) => {
+            if (currentValue === autoPaidAmount) {
+                return "";
+            }
+
+            return currentValue;
+        });
+    }, [
+        canReceivePayment,
+        selectedPayment?.value,
+        selectedPaymentIsCash,
+        paymentTargetAmount,
+    ]);
 
     useEffect(() => {
         fetchOptions();
@@ -822,6 +849,7 @@ export default function PosIndexPage() {
                         isPoCart={isPoCart}
                         isPoUnpaid={isPoUnpaid}
                         canReceivePayment={canReceivePayment}
+                        selectedPaymentIsCash={selectedPaymentIsCash}
                     />
 
                     <InvoicePanel
@@ -1549,9 +1577,11 @@ function PaymentPanel({
     isPoCart,
     isPoUnpaid,
     canReceivePayment,
+    selectedPaymentIsCash,
 }) {
     const paidNumber = normalizeMoney(paidAmount);
     const isDpPayment = isPoCart && paymentType === "DP";
+    const isNonCashSelected = Boolean(selectedPayment) && !selectedPaymentIsCash;
 
     const paymentButtonDisabled =
         !cart ||
@@ -1654,7 +1684,21 @@ function PaymentPanel({
                     label="Metode Pembayaran"
                     value={selectedPayment}
                     options={paymentOptions}
-                    onChange={(selected) => setPaymentId(selected?.value || "")}
+                    onChange={(selected) => {
+                        setPaymentId(selected?.value || "");
+
+                        if (!selected) {
+                            setPaidAmount("");
+                            return;
+                        }
+
+                        if (!isCashPaymentMethod(selected)) {
+                            setPaidAmount(paymentTargetAmount > 0 ? String(paymentTargetAmount) : "");
+                            return;
+                        }
+
+                        setPaidAmount("");
+                    }}
                     placeholder="Pilih metode pembayaran"
                     disabled={!cart || saving || !canReceivePayment}
                 />
@@ -1670,8 +1714,15 @@ function PaymentPanel({
                         setPaidAmount(value);
                     }}
                     placeholder="0"
-                    disabled={!cart || saving || !canReceivePayment}
+                    disabled={!cart || saving || !canReceivePayment || isNonCashSelected}
+                    inputClassName="h-16 px-5 text-2xl font-black text-slate-950 md:text-3xl"
                 />
+
+                {isNonCashSelected && canReceivePayment && (
+                    <div className="rounded-2xl bg-blue-50 px-4 py-3 text-xs font-black text-blue-700 ring-1 ring-blue-100">
+                        Bayar Sesuai Tagihan.
+                    </div>
+                )}
 
                 {isPoCart && canReceivePayment && (
                     <div className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-100">
@@ -2160,7 +2211,10 @@ const selectStyles = {
     }),
 };
 
-function Input({ label, ...props }) {
+function Input({ label, inputClassName = "", ...props }) {
+    const baseClassName =
+        "h-12 w-full min-w-0 rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm font-bold text-slate-700 outline-none focus:border-slate-950 focus:bg-white disabled:cursor-not-allowed disabled:opacity-60";
+
     return (
         <div className="min-w-0">
             <label className="mb-2 block text-sm font-black text-slate-700">
@@ -2169,7 +2223,7 @@ function Input({ label, ...props }) {
 
             <input
                 {...props}
-                className="h-12 w-full min-w-0 rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm font-bold text-slate-700 outline-none focus:border-slate-950 focus:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+                className={`${baseClassName} ${inputClassName}`}
             />
         </div>
     );
@@ -3010,6 +3064,23 @@ function normalizeMoney(value) {
 
     // Rupiah real tanpa pembulatan ke atas.
     return Math.floor(number);
+}
+
+function getPaymentMethodLabel(payment) {
+    return String(
+        payment?.label ||
+            payment?.payment ||
+            payment?.nama_payment ||
+            payment?.name ||
+            payment?.code ||
+            ""
+    ).trim();
+}
+
+function isCashPaymentMethod(payment) {
+    const label = getPaymentMethodLabel(payment).toLowerCase();
+
+    return label === "cash";
 }
 
 function formatRupiah(value) {
