@@ -42,6 +42,7 @@ class DashboardController extends Controller
                 'options' => [
                     'events' => DataEvent::query()
                         ->select('id', 'nama_event', 'alamat_event', 'valid_from', 'valid_until')
+                        ->whereNull('deleted_at')
                         ->orderByDesc('valid_from')
                         ->orderBy('nama_event')
                         ->get(),
@@ -68,8 +69,8 @@ class DashboardController extends Controller
             ->groupBy('ecd.event_carts_id')
             ->selectRaw('
                 ecd.event_carts_id,
-                SUM(ecd.qty) as total_qty,
-                SUM(ecd.qty * COALESCE(pp.harga_produk, 0)) as total_amount
+                COALESCE(SUM(ecd.qty), 0) as total_qty,
+                COALESCE(SUM(ecd.qty * COALESCE(pp.harga_produk, 0)), 0) as total_amount
             ');
     }
 
@@ -105,7 +106,11 @@ class DashboardController extends Controller
     private function stockRowsQuery(array $filters)
     {
         $inboundSub = DB::table('event_inbound')
-            ->selectRaw('event_id, produk_price_id, SUM(jumlah_produk) as stock_masuk')
+            ->selectRaw('
+                event_id,
+                produk_price_id,
+                COALESCE(SUM(jumlah_produk), 0) as stock_masuk
+            ')
             ->whereNull('deleted_at')
             ->groupBy('event_id', 'produk_price_id');
 
@@ -114,9 +119,27 @@ class DashboardController extends Controller
             ->selectRaw('
                 ec.event_id,
                 ecd.produk_price_id,
-                SUM(CASE WHEN ec.status = ? AND (ec.transaction_type IS NULL OR ec.transaction_type = ?) THEN ecd.qty ELSE 0 END) as stock_draft,
-                SUM(CASE WHEN ec.status = ? AND (ec.transaction_type IS NULL OR ec.transaction_type = ?) THEN ecd.qty ELSE 0 END) as stock_paid,
-                SUM(CASE WHEN ec.status IN (?, ?) AND ec.transaction_type = ? THEN ecd.qty ELSE 0 END) as stock_po
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ? AND (ec.transaction_type IS NULL OR ec.transaction_type = ?)
+                        THEN ecd.qty
+                        ELSE 0
+                    END
+                ), 0) as stock_draft,
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ? AND (ec.transaction_type IS NULL OR ec.transaction_type = ?)
+                        THEN ecd.qty
+                        ELSE 0
+                    END
+                ), 0) as stock_paid,
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status IN (?, ?) AND ec.transaction_type = ?
+                        THEN ecd.qty
+                        ELSE 0
+                    END
+                ), 0) as stock_po
             ', [
                 self::STATUS_DRAFT,
                 self::TYPE_PEMBELIAN,
@@ -161,10 +184,18 @@ class DashboardController extends Controller
                 COALESCE(us.stock_draft, 0) as stock_draft,
                 COALESCE(us.stock_paid, 0) as stock_paid,
                 COALESCE(us.stock_po, 0) as stock_po,
-                GREATEST(
-                    COALESCE(ib.stock_masuk, 0) - COALESCE(us.stock_draft, 0) - COALESCE(us.stock_paid, 0),
-                    0
-                ) as stock_akhir
+                CASE
+                    WHEN (
+                        COALESCE(ib.stock_masuk, 0)
+                        - COALESCE(us.stock_draft, 0)
+                        - COALESCE(us.stock_paid, 0)
+                    ) < 0 THEN 0
+                    ELSE (
+                        COALESCE(ib.stock_masuk, 0)
+                        - COALESCE(us.stock_draft, 0)
+                        - COALESCE(us.stock_paid, 0)
+                    )
+                END as stock_akhir
             ');
 
         if (!empty($filters['event_id'])) {
@@ -179,12 +210,33 @@ class DashboardController extends Controller
         $today = now()->toDateString();
 
         $master = [
-            'total_events' => (int) DB::table('data_event')->whereNull('deleted_at')->count(),
-            'active_events' => (int) DB::table('data_event')->whereNull('deleted_at')->whereDate('valid_from', '<=', $today)->whereDate('valid_until', '>=', $today)->count(),
-            'upcoming_events' => (int) DB::table('data_event')->whereNull('deleted_at')->whereDate('valid_from', '>', $today)->count(),
-            'expired_events' => (int) DB::table('data_event')->whereNull('deleted_at')->whereDate('valid_until', '<', $today)->count(),
-            'total_products' => (int) DB::table('produk')->whereNull('deleted_at')->count(),
-            'total_product_prices' => (int) DB::table('produk_price')->whereNull('deleted_at')->count(),
+            'total_events' => (int) DB::table('data_event')
+                ->whereNull('deleted_at')
+                ->count(),
+
+            'active_events' => (int) DB::table('data_event')
+                ->whereNull('deleted_at')
+                ->whereDate('valid_from', '<=', $today)
+                ->whereDate('valid_until', '>=', $today)
+                ->count(),
+
+            'upcoming_events' => (int) DB::table('data_event')
+                ->whereNull('deleted_at')
+                ->whereDate('valid_from', '>', $today)
+                ->count(),
+
+            'expired_events' => (int) DB::table('data_event')
+                ->whereNull('deleted_at')
+                ->whereDate('valid_until', '<', $today)
+                ->count(),
+
+            'total_products' => (int) DB::table('produk')
+                ->whereNull('deleted_at')
+                ->count(),
+
+            'total_product_prices' => (int) DB::table('produk_price')
+                ->whereNull('deleted_at')
+                ->count(),
         ];
 
         $trx = $this->cartBaseQuery($filters)
@@ -194,9 +246,27 @@ class DashboardController extends Controller
                 COUNT(DISTINCT CASE WHEN ec.status = ? THEN ec.id END) as draft_transactions,
                 COUNT(DISTINCT CASE WHEN ec.status IN (?, ?, ?) THEN ec.id END) as void_transactions,
                 COALESCE(SUM(ct.total_qty), 0) as total_qty_sold,
-                COALESCE(SUM(CASE WHEN ec.status = ? THEN COALESCE(ep.total_amount, ct.total_amount, 0) ELSE 0 END), 0) as omzet,
-                COALESCE(SUM(CASE WHEN ec.status = ? THEN COALESCE(ep.paid_amount, 0) ELSE 0 END), 0) as paid_amount,
-                COALESCE(SUM(CASE WHEN ec.status = ? THEN COALESCE(ep.remaining_amount, 0) ELSE 0 END), 0) as remaining_amount
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ?
+                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                        ELSE 0
+                    END
+                ), 0) as omzet,
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ?
+                        THEN COALESCE(ep.paid_amount, 0)
+                        ELSE 0
+                    END
+                ), 0) as paid_amount,
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ?
+                        THEN COALESCE(ep.remaining_amount, 0)
+                        ELSE 0
+                    END
+                ), 0) as remaining_amount
             ", [
                 self::STATUS_PAID,
                 self::STATUS_DRAFT,
@@ -233,7 +303,7 @@ class DashboardController extends Controller
             'total_stock_terpakai' => (int) ($rows->sum('stock_draft') + $rows->sum('stock_paid')),
             'total_stock_po' => (int) $rows->sum('stock_po'),
             'total_stock_akhir' => (int) $rows->sum('stock_akhir'),
-            'stock_kosong' => $rows->where('stock_akhir', '<=', 0)->count(),
+            'stock_kosong' => $rows->filter(fn ($row) => (int) $row->stock_akhir <= 0)->count(),
             'stock_menipis' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 0 && (int) $row->stock_akhir <= 10)->count(),
             'stock_aman' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 10)->count(),
         ];
@@ -274,9 +344,18 @@ class DashboardController extends Controller
         $total = max($rows->count(), 1);
 
         $items = collect([
-            ['label' => 'Stok Aman', 'total' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 10)->count()],
-            ['label' => 'Stok Menipis', 'total' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 0 && (int) $row->stock_akhir <= 10)->count()],
-            ['label' => 'Stok Kosong', 'total' => $rows->where('stock_akhir', '<=', 0)->count()],
+            [
+                'label' => 'Stok Aman',
+                'total' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 10)->count(),
+            ],
+            [
+                'label' => 'Stok Menipis',
+                'total' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 0 && (int) $row->stock_akhir <= 10)->count(),
+            ],
+            [
+                'label' => 'Stok Kosong',
+                'total' => $rows->filter(fn ($row) => (int) $row->stock_akhir <= 0)->count(),
+            ],
         ]);
 
         return $items->map(function ($item) use ($total) {
@@ -294,7 +373,13 @@ class DashboardController extends Controller
             ->selectRaw("
                 COALESCE(ec.transaction_type, ?) as label,
                 COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(CASE WHEN ec.status = ? THEN COALESCE(ep.total_amount, ct.total_amount, 0) ELSE 0 END), 0) as omzet
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ?
+                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                        ELSE 0
+                    END
+                ), 0) as omzet
             ", [self::TYPE_PEMBELIAN, self::STATUS_PAID])
             ->groupByRaw('COALESCE(ec.transaction_type, ?)', [self::TYPE_PEMBELIAN])
             ->orderByDesc('total')
@@ -312,7 +397,13 @@ class DashboardController extends Controller
             ->selectRaw("
                 COALESCE(ep.payment_status, ec.status, '-') as label,
                 COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(CASE WHEN ec.status = ? THEN COALESCE(ep.total_amount, ct.total_amount, 0) ELSE 0 END), 0) as omzet
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ?
+                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                        ELSE 0
+                    END
+                ), 0) as omzet
             ", [self::STATUS_PAID])
             ->groupByRaw("COALESCE(ep.payment_status, ec.status, '-')")
             ->orderByDesc('total')
@@ -329,16 +420,36 @@ class DashboardController extends Controller
         return $this->cartBaseQuery($filters)
             ->selectRaw("
                 CASE
-                    WHEN LOWER(COALESCE(ec.customer, '')) IN ('', '-', 'walk in customer', 'walk-in customer', 'walkin customer', 'walkin')
+                    WHEN LOWER(COALESCE(ec.customer, '')) IN (
+                        '',
+                        '-',
+                        'walk in customer',
+                        'walk-in customer',
+                        'walkin customer',
+                        'walkin'
+                    )
                     THEN 'Walk In Customer'
                     ELSE 'Customer Bernama'
                 END as label,
                 COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(CASE WHEN ec.status = ? THEN COALESCE(ep.total_amount, ct.total_amount, 0) ELSE 0 END), 0) as omzet
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ?
+                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                        ELSE 0
+                    END
+                ), 0) as omzet
             ", [self::STATUS_PAID])
             ->groupByRaw("
                 CASE
-                    WHEN LOWER(COALESCE(ec.customer, '')) IN ('', '-', 'walk in customer', 'walk-in customer', 'walkin customer', 'walkin')
+                    WHEN LOWER(COALESCE(ec.customer, '')) IN (
+                        '',
+                        '-',
+                        'walk in customer',
+                        'walk-in customer',
+                        'walkin customer',
+                        'walkin'
+                    )
                     THEN 'Walk In Customer'
                     ELSE 'Customer Bernama'
                 END
@@ -361,7 +472,13 @@ class DashboardController extends Controller
                 COALESCE(de.alamat_event, '-') as alamat_event,
                 COUNT(DISTINCT ec.id) as total_transactions,
                 COALESCE(SUM(ct.total_qty), 0) as total_qty,
-                COALESCE(SUM(CASE WHEN ec.status = ? THEN COALESCE(ep.total_amount, ct.total_amount, 0) ELSE 0 END), 0) as omzet
+                COALESCE(SUM(
+                    CASE
+                        WHEN ec.status = ?
+                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
+                        ELSE 0
+                    END
+                ), 0) as omzet
             ", [self::STATUS_PAID])
             ->groupBy('de.id', 'de.nama_event', 'de.alamat_event')
             ->orderByDesc('omzet')
@@ -410,8 +527,8 @@ class DashboardController extends Controller
                 p.nama_produk,
                 p.product_number,
                 de.nama_event,
-                SUM(ecd.qty) as total_qty,
-                SUM(ecd.qty * COALESCE(pp.harga_produk, 0)) as omzet,
+                COALESCE(SUM(ecd.qty), 0) as total_qty,
+                COALESCE(SUM(ecd.qty * COALESCE(pp.harga_produk, 0)), 0) as omzet,
                 COUNT(DISTINCT ec.id) as total_transactions
             ")
             ->groupBy(

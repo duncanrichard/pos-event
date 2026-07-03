@@ -3,598 +3,552 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
-use App\Models\DataEvent;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 
-class DashboardController extends Controller
+class ProdukPriceController extends Controller
 {
-    private const STATUS_DRAFT = 'Draft';
-    private const STATUS_PAID = 'Paid';
-    private const STATUS_VOID_CARTS = 'Void Carts';
-    private const STATUS_VOID_TRANSAKSI = 'Void Transaksi';
-    private const STATUS_VOID_OLD = 'Void';
-
-    private const TYPE_PO = 'PO';
-    private const TYPE_PEMBELIAN = 'Pembelian';
+    private string $produkPriceTable = 'produk_price';
+    private string $bundleDetailTable = 'produk_price_details';
 
     public function index(Request $request)
     {
-        $filters = $this->normalizeFilters($request);
+        $search = trim((string) $request->query('search', ''));
+        $perPage = (int) $request->query('per_page', 10);
+        $perPage = $perPage > 0 ? $perPage : 10;
+
+        $query = DB::table($this->produkPriceTable . ' as pp')
+            ->leftJoin('produk as p', function ($join) {
+                $join->on('p.id', '=', 'pp.produk_id')
+                    ->whereNull('p.deleted_at');
+            })
+            ->leftJoin('data_event as de', function ($join) {
+                $join->on('de.id', '=', 'pp.event_id')
+                    ->whereNull('de.deleted_at');
+            })
+            ->whereNull('pp.deleted_at')
+            ->select([
+                'pp.id',
+                'pp.produk_id',
+                'pp.harga_produk',
+                'pp.created_at',
+                'pp.updated_at',
+                'pp.deleted_at',
+                'pp.event_id',
+                'pp.tipe_harga',
+                'pp.nama_bundle',
+
+                'p.nama_produk',
+                'p.product_number',
+                'p.code_gs1',
+
+                'de.nama_event',
+                'de.alamat_event',
+                'de.valid_from',
+                'de.valid_until',
+            ])
+            ->when($search !== '', function ($q) use ($search) {
+                $q->where(function ($sub) use ($search) {
+                    $sub->where('p.nama_produk', 'like', '%' . $search . '%')
+                        ->orWhere('p.product_number', 'like', '%' . $search . '%')
+                        ->orWhere('p.code_gs1', 'like', '%' . $search . '%')
+                        ->orWhere('pp.nama_bundle', 'like', '%' . $search . '%')
+                        ->orWhere('de.nama_event', 'like', '%' . $search . '%')
+                        ->orWhere('de.alamat_event', 'like', '%' . $search . '%');
+                });
+            })
+            ->orderByDesc('pp.created_at');
+
+        $paginator = $query->paginate($perPage);
+
+        $rows = collect($paginator->items())->map(function ($row) {
+            return $this->formatRow($row);
+        })->values();
 
         return response()->json([
             'success' => true,
-            'message' => 'Dashboard berhasil dimuat.',
-            'filters' => $filters,
+            'message' => 'Data produk price berhasil dimuat.',
             'data' => [
-                'summary' => $this->getSummary($filters),
-                'stock_summary' => $this->getStockSummary($filters),
-                'demographics' => [
-                    'event_status' => $this->getEventStatusDemography(),
-                    'stock_status' => $this->getStockStatusDemography($filters),
-                    'transaction_type' => $this->getTransactionTypeDemography($filters),
-                    'payment_status' => $this->getPaymentStatusDemography($filters),
-                    'customer_type' => $this->getCustomerTypeDemography($filters),
-                ],
-                'top_events' => $this->getTopEvents($filters),
-                'top_products' => $this->getTopProducts($filters),
-                'recent_transactions' => $this->getRecentTransactions($filters),
-                'options' => [
-                    'events' => DataEvent::query()
-                        ->select('id', 'nama_event', 'alamat_event', 'valid_from', 'valid_until')
-                        ->whereNull('deleted_at')
-                        ->orderByDesc('valid_from')
-                        ->orderBy('nama_event')
-                        ->get(),
-                ],
+                'current_page' => $paginator->currentPage(),
+                'data' => $rows,
+                'first_page_url' => $paginator->url(1),
+                'from' => $paginator->firstItem(),
+                'last_page' => $paginator->lastPage(),
+                'last_page_url' => $paginator->url($paginator->lastPage()),
+                'links' => $paginator->linkCollection(),
+                'next_page_url' => $paginator->nextPageUrl(),
+                'path' => $paginator->path(),
+                'per_page' => $paginator->perPage(),
+                'prev_page_url' => $paginator->previousPageUrl(),
+                'to' => $paginator->lastItem(),
+                'total' => $paginator->total(),
             ],
         ]);
     }
 
-    private function normalizeFilters(Request $request): array
+    public function options()
     {
-        return [
-            'event_id' => trim((string) $request->query('event_id', '')) ?: null,
-            'date_from' => $request->query('date_from') ?: now()->subDays(30)->toDateString(),
-            'date_to' => $request->query('date_to') ?: now()->toDateString(),
-        ];
-    }
-
-    private function cartTotalSubQuery()
-    {
-        return DB::table('event_carts_detail as ecd')
-            ->join('produk_price as pp', 'pp.id', '=', 'ecd.produk_price_id')
-            ->whereNull('ecd.deleted_at')
-            ->whereNull('pp.deleted_at')
-            ->groupBy('ecd.event_carts_id')
-            ->selectRaw('
-                ecd.event_carts_id,
-                COALESCE(SUM(ecd.qty), 0) as total_qty,
-                COALESCE(SUM(ecd.qty * COALESCE(pp.harga_produk, 0)), 0) as total_amount
-            ');
-    }
-
-    private function cartBaseQuery(array $filters)
-    {
-        $query = DB::table('event_carts as ec')
-            ->leftJoin('data_event as de', 'de.id', '=', 'ec.event_id')
-            ->leftJoin('event_payment as ep', function ($join) {
-                $join->on('ep.event_carts_id', '=', 'ec.id')
-                    ->whereNull('ep.deleted_at');
-            })
-            ->leftJoin('payments as pay', 'pay.id', '=', 'ep.payment_id')
-            ->leftJoinSub($this->cartTotalSubQuery(), 'ct', function ($join) {
-                $join->on('ct.event_carts_id', '=', 'ec.id');
-            })
-            ->whereNull('ec.deleted_at');
-
-        if (!empty($filters['event_id'])) {
-            $query->where('ec.event_id', $filters['event_id']);
-        }
-
-        if (!empty($filters['date_from'])) {
-            $query->whereDate('ec.tanggal_carts', '>=', $filters['date_from']);
-        }
-
-        if (!empty($filters['date_to'])) {
-            $query->whereDate('ec.tanggal_carts', '<=', $filters['date_to']);
-        }
-
-        return $query;
-    }
-
-    private function stockRowsQuery(array $filters)
-    {
-        $inboundSub = DB::table('event_inbound')
-            ->selectRaw('
-                event_id,
-                produk_price_id,
-                COALESCE(SUM(jumlah_produk), 0) as stock_masuk
-            ')
-            ->whereNull('deleted_at')
-            ->groupBy('event_id', 'produk_price_id');
-
-        $usedSub = DB::table('event_carts_detail as ecd')
-            ->join('event_carts as ec', 'ec.id', '=', 'ecd.event_carts_id')
-            ->selectRaw('
-                ec.event_id,
-                ecd.produk_price_id,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ? AND (ec.transaction_type IS NULL OR ec.transaction_type = ?)
-                        THEN ecd.qty
-                        ELSE 0
-                    END
-                ), 0) as stock_draft,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ? AND (ec.transaction_type IS NULL OR ec.transaction_type = ?)
-                        THEN ecd.qty
-                        ELSE 0
-                    END
-                ), 0) as stock_paid,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status IN (?, ?) AND ec.transaction_type = ?
-                        THEN ecd.qty
-                        ELSE 0
-                    END
-                ), 0) as stock_po
-            ', [
-                self::STATUS_DRAFT,
-                self::TYPE_PEMBELIAN,
-                self::STATUS_PAID,
-                self::TYPE_PEMBELIAN,
-                self::STATUS_DRAFT,
-                self::STATUS_PAID,
-                self::TYPE_PO,
+        $produk = DB::table('produk')
+            ->select([
+                'id',
+                'nama_produk',
+                'product_number',
+                'code_gs1',
             ])
-            ->whereNull('ecd.deleted_at')
-            ->whereNull('ec.deleted_at')
-            ->groupBy('ec.event_id', 'ecd.produk_price_id');
+            ->whereNull('deleted_at')
+            ->orderBy('nama_produk')
+            ->get();
 
-        $query = DB::table('produk_price as pp')
-            ->join('produk as p', 'p.id', '=', 'pp.produk_id')
-            ->leftJoin('data_event as de', 'de.id', '=', 'pp.event_id')
-            ->leftJoinSub($inboundSub, 'ib', function ($join) {
-                $join->on('ib.produk_price_id', '=', 'pp.id')
-                    ->on('ib.event_id', '=', 'pp.event_id');
-            })
-            ->leftJoinSub($usedSub, 'us', function ($join) {
-                $join->on('us.produk_price_id', '=', 'pp.id')
-                    ->on('us.event_id', '=', 'pp.event_id');
-            })
-            ->whereNull('pp.deleted_at')
-            ->whereNull('p.deleted_at')
-            ->where(function ($q) {
-                $q->whereNull('pp.tipe_harga')
-                    ->orWhere('pp.tipe_harga', 'single');
-            })
-            ->selectRaw('
-                pp.id as produk_price_id,
-                pp.event_id,
-                pp.produk_id,
-                pp.harga_produk,
-                p.nama_produk,
-                p.product_number,
-                p.code_gs1,
-                de.nama_event,
-                de.alamat_event,
-                COALESCE(ib.stock_masuk, 0) as stock_masuk,
-                COALESCE(us.stock_draft, 0) as stock_draft,
-                COALESCE(us.stock_paid, 0) as stock_paid,
-                COALESCE(us.stock_po, 0) as stock_po,
-                CASE
-                    WHEN (
-                        COALESCE(ib.stock_masuk, 0)
-                        - COALESCE(us.stock_draft, 0)
-                        - COALESCE(us.stock_paid, 0)
-                    ) < 0 THEN 0
-                    ELSE (
-                        COALESCE(ib.stock_masuk, 0)
-                        - COALESCE(us.stock_draft, 0)
-                        - COALESCE(us.stock_paid, 0)
-                    )
-                END as stock_akhir
-            ');
+        $events = DB::table('data_event')
+            ->select([
+                'id',
+                'nama_event',
+                'alamat_event',
+                'valid_from',
+                'valid_until',
+            ])
+            ->whereNull('deleted_at')
+            ->orderByDesc('valid_from')
+            ->orderBy('nama_event')
+            ->get();
 
-        if (!empty($filters['event_id'])) {
-            $query->where('pp.event_id', $filters['event_id']);
-        }
-
-        return $query;
+        return response()->json([
+            'success' => true,
+            'message' => 'Options berhasil dimuat.',
+            'data' => [
+                'produk' => $produk,
+                'events' => $events,
+            ],
+        ]);
     }
 
-    private function getSummary(array $filters): array
+    public function store(Request $request)
     {
-        $today = now()->toDateString();
+        $validator = $this->validator($request);
 
-        $master = [
-            'total_events' => (int) DB::table('data_event')
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validasi gagal.',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $validated = $validator->validated();
+
+        DB::beginTransaction();
+
+        try {
+            $id = (string) Str::uuid();
+
+            DB::table($this->produkPriceTable)->insert([
+                'id' => $id,
+                'produk_id' => $validated['tipe_harga'] === 'single'
+                    ? $validated['produk_id']
+                    : null,
+                'harga_produk' => $validated['harga_produk'],
+                'event_id' => $validated['event_id'],
+                'tipe_harga' => $validated['tipe_harga'],
+                'nama_bundle' => $validated['tipe_harga'] === 'bundle'
+                    ? $validated['nama_bundle']
+                    : null,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            if ($validated['tipe_harga'] === 'bundle') {
+                $this->syncBundleDetails($id, $validated['items'] ?? []);
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Produk price berhasil ditambahkan.',
+                'data' => $this->findDetail($id),
+            ], 201);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            report($e);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menyimpan produk price.',
+                'error' => config('app.debug') ? $e->getMessage() : null,
+            ], 500);
+        }
+    }
+
+    public function show(string $id)
+    {
+        $row = $this->findDetail($id);
+
+        if (!$row) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Produk price tidak ditemukan.',
+            ], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Detail produk price berhasil dimuat.',
+            'data' => $row,
+        ]);
+    }
+
+    public function update(Request $request, string $id)
+    {
+        $existing = DB::table($this->produkPriceTable)
+            ->where('id', $id)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if (!$existing) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Produk price tidak ditemukan.',
+            ], 404);
+        }
+
+        $validator = $this->validator($request);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validasi gagal.',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $validated = $validator->validated();
+
+        DB::beginTransaction();
+
+        try {
+            DB::table($this->produkPriceTable)
+                ->where('id', $id)
+                ->update([
+                    'produk_id' => $validated['tipe_harga'] === 'single'
+                        ? $validated['produk_id']
+                        : null,
+                    'harga_produk' => $validated['harga_produk'],
+                    'event_id' => $validated['event_id'],
+                    'tipe_harga' => $validated['tipe_harga'],
+                    'nama_bundle' => $validated['tipe_harga'] === 'bundle'
+                        ? $validated['nama_bundle']
+                        : null,
+                    'updated_at' => now(),
+                ]);
+
+            if ($validated['tipe_harga'] === 'bundle') {
+                $this->syncBundleDetails($id, $validated['items'] ?? []);
+            } else {
+                DB::table($this->bundleDetailTable)
+                    ->where('produk_price_id', $id)
+                    ->whereNull('deleted_at')
+                    ->update([
+                        'deleted_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Produk price berhasil diperbarui.',
+                'data' => $this->findDetail($id),
+            ]);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            report($e);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal memperbarui produk price.',
+                'error' => config('app.debug') ? $e->getMessage() : null,
+            ], 500);
+        }
+    }
+
+    public function destroy(string $id)
+    {
+        $existing = DB::table($this->produkPriceTable)
+            ->where('id', $id)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if (!$existing) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Produk price tidak ditemukan.',
+            ], 404);
+        }
+
+        DB::beginTransaction();
+
+        try {
+            DB::table($this->bundleDetailTable)
+                ->where('produk_price_id', $id)
                 ->whereNull('deleted_at')
-                ->count(),
+                ->update([
+                    'deleted_at' => now(),
+                    'updated_at' => now(),
+                ]);
 
-            'active_events' => (int) DB::table('data_event')
-                ->whereNull('deleted_at')
-                ->whereDate('valid_from', '<=', $today)
-                ->whereDate('valid_until', '>=', $today)
-                ->count(),
+            DB::table($this->produkPriceTable)
+                ->where('id', $id)
+                ->update([
+                    'deleted_at' => now(),
+                    'updated_at' => now(),
+                ]);
 
-            'upcoming_events' => (int) DB::table('data_event')
-                ->whereNull('deleted_at')
-                ->whereDate('valid_from', '>', $today)
-                ->count(),
+            DB::commit();
 
-            'expired_events' => (int) DB::table('data_event')
-                ->whereNull('deleted_at')
-                ->whereDate('valid_until', '<', $today)
-                ->count(),
+            return response()->json([
+                'success' => true,
+                'message' => 'Produk price berhasil dihapus.',
+            ]);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            report($e);
 
-            'total_products' => (int) DB::table('produk')
-                ->whereNull('deleted_at')
-                ->count(),
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menghapus produk price.',
+                'error' => config('app.debug') ? $e->getMessage() : null,
+            ], 500);
+        }
+    }
 
-            'total_product_prices' => (int) DB::table('produk_price')
-                ->whereNull('deleted_at')
-                ->count(),
-        ];
+    private function validator(Request $request)
+    {
+        return Validator::make($request->all(), [
+            'tipe_harga' => [
+                'required',
+                Rule::in(['single', 'bundle']),
+            ],
+            'event_id' => [
+                'required',
+                'uuid',
+                Rule::exists('data_event', 'id')->whereNull('deleted_at'),
+            ],
+            'produk_id' => [
+                'nullable',
+                'required_if:tipe_harga,single',
+                'uuid',
+                Rule::exists('produk', 'id')->whereNull('deleted_at'),
+            ],
+            'nama_bundle' => [
+                'nullable',
+                'required_if:tipe_harga,bundle',
+                'string',
+                'max:255',
+            ],
+            'harga_produk' => [
+                'required',
+                'numeric',
+                'min:0',
+            ],
+            'items' => [
+                'nullable',
+                'required_if:tipe_harga,bundle',
+                'array',
+                'min:1',
+            ],
+            'items.*.produk_id' => [
+                'required_if:tipe_harga,bundle',
+                'uuid',
+                Rule::exists('produk', 'id')->whereNull('deleted_at'),
+            ],
+            'items.*.qty' => [
+                'required_if:tipe_harga,bundle',
+                'integer',
+                'min:1',
+            ],
+        ], [
+            'tipe_harga.required' => 'Tipe harga wajib dipilih.',
+            'tipe_harga.in' => 'Tipe harga tidak valid.',
 
-        $trx = $this->cartBaseQuery($filters)
-            ->selectRaw("
-                COUNT(DISTINCT ec.id) as total_transactions,
-                COUNT(DISTINCT CASE WHEN ec.status = ? THEN ec.id END) as paid_transactions,
-                COUNT(DISTINCT CASE WHEN ec.status = ? THEN ec.id END) as draft_transactions,
-                COUNT(DISTINCT CASE WHEN ec.status IN (?, ?, ?) THEN ec.id END) as void_transactions,
-                COALESCE(SUM(ct.total_qty), 0) as total_qty_sold,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as omzet,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.paid_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as paid_amount,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.remaining_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as remaining_amount
-            ", [
-                self::STATUS_PAID,
-                self::STATUS_DRAFT,
-                self::STATUS_VOID_CARTS,
-                self::STATUS_VOID_TRANSAKSI,
-                self::STATUS_VOID_OLD,
-                self::STATUS_PAID,
-                self::STATUS_PAID,
-                self::STATUS_PAID,
+            'event_id.required' => 'Event wajib dipilih.',
+            'event_id.uuid' => 'Format event tidak valid.',
+            'event_id.exists' => 'Event tidak ditemukan.',
+
+            'produk_id.required_if' => 'Produk wajib dipilih untuk harga single.',
+            'produk_id.uuid' => 'Format produk tidak valid.',
+            'produk_id.exists' => 'Produk tidak ditemukan.',
+
+            'nama_bundle.required_if' => 'Nama bundle wajib diisi.',
+            'nama_bundle.max' => 'Nama bundle maksimal 255 karakter.',
+
+            'harga_produk.required' => 'Harga wajib diisi.',
+            'harga_produk.numeric' => 'Harga harus berupa angka.',
+            'harga_produk.min' => 'Harga tidak boleh kurang dari 0.',
+
+            'items.required_if' => 'Isi bundle wajib diisi.',
+            'items.array' => 'Format isi bundle tidak valid.',
+            'items.min' => 'Isi bundle minimal 1 produk.',
+
+            'items.*.produk_id.required_if' => 'Produk bundle wajib dipilih.',
+            'items.*.produk_id.uuid' => 'Format produk bundle tidak valid.',
+            'items.*.produk_id.exists' => 'Produk bundle tidak ditemukan.',
+
+            'items.*.qty.required_if' => 'Qty bundle wajib diisi.',
+            'items.*.qty.integer' => 'Qty bundle harus angka bulat.',
+            'items.*.qty.min' => 'Qty bundle minimal 1.',
+        ]);
+    }
+
+    private function syncBundleDetails(string $produkPriceId, array $items): void
+    {
+        DB::table($this->bundleDetailTable)
+            ->where('produk_price_id', $produkPriceId)
+            ->whereNull('deleted_at')
+            ->update([
+                'deleted_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+        foreach ($items as $item) {
+            if (empty($item['produk_id']) || (int) ($item['qty'] ?? 0) <= 0) {
+                continue;
+            }
+
+            DB::table($this->bundleDetailTable)->insert([
+                'id' => (string) Str::uuid(),
+                'produk_price_id' => $produkPriceId,
+                'produk_id' => $item['produk_id'],
+                'qty' => (int) $item['qty'],
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+    }
+
+    private function getBundleDetails(string $produkPriceId)
+    {
+        return DB::table($this->bundleDetailTable . ' as ppd')
+            ->leftJoin('produk as p', function ($join) {
+                $join->on('p.id', '=', 'ppd.produk_id')
+                    ->whereNull('p.deleted_at');
+            })
+            ->where('ppd.produk_price_id', $produkPriceId)
+            ->whereNull('ppd.deleted_at')
+            ->select([
+                'ppd.id',
+                'ppd.produk_price_id',
+                'ppd.produk_id',
+                'ppd.qty',
+                'ppd.created_at',
+                'ppd.updated_at',
+
+                'p.nama_produk',
+                'p.product_number',
+                'p.code_gs1',
+            ])
+            ->orderBy('ppd.created_at')
+            ->get()
+            ->map(function ($detail) {
+                return [
+                    'id' => $detail->id,
+                    'produk_price_id' => $detail->produk_price_id,
+                    'produk_id' => $detail->produk_id,
+                    'qty' => (int) $detail->qty,
+                    'created_at' => $detail->created_at,
+                    'updated_at' => $detail->updated_at,
+                    'produk' => [
+                        'id' => $detail->produk_id,
+                        'nama_produk' => $detail->nama_produk,
+                        'product_number' => $detail->product_number,
+                        'code_gs1' => $detail->code_gs1,
+                    ],
+                ];
+            })
+            ->values();
+    }
+
+    private function findDetail(string $id): ?array
+    {
+        $row = DB::table($this->produkPriceTable . ' as pp')
+            ->leftJoin('produk as p', function ($join) {
+                $join->on('p.id', '=', 'pp.produk_id')
+                    ->whereNull('p.deleted_at');
+            })
+            ->leftJoin('data_event as de', function ($join) {
+                $join->on('de.id', '=', 'pp.event_id')
+                    ->whereNull('de.deleted_at');
+            })
+            ->where('pp.id', $id)
+            ->whereNull('pp.deleted_at')
+            ->select([
+                'pp.id',
+                'pp.produk_id',
+                'pp.harga_produk',
+                'pp.created_at',
+                'pp.updated_at',
+                'pp.deleted_at',
+                'pp.event_id',
+                'pp.tipe_harga',
+                'pp.nama_bundle',
+
+                'p.nama_produk',
+                'p.product_number',
+                'p.code_gs1',
+
+                'de.nama_event',
+                'de.alamat_event',
+                'de.valid_from',
+                'de.valid_until',
             ])
             ->first();
 
-        return array_merge($master, [
-            'total_transactions' => (int) ($trx->total_transactions ?? 0),
-            'paid_transactions' => (int) ($trx->paid_transactions ?? 0),
-            'draft_transactions' => (int) ($trx->draft_transactions ?? 0),
-            'void_transactions' => (int) ($trx->void_transactions ?? 0),
-            'total_qty_sold' => (int) ($trx->total_qty_sold ?? 0),
-            'omzet' => (float) ($trx->omzet ?? 0),
-            'paid_amount' => (float) ($trx->paid_amount ?? 0),
-            'remaining_amount' => (float) ($trx->remaining_amount ?? 0),
-        ]);
+        if (!$row) {
+            return null;
+        }
+
+        return $this->formatRow($row);
     }
 
-    private function getStockSummary(array $filters): array
+    private function formatRow(object $row): array
     {
-        $rows = $this->stockRowsQuery($filters)->get();
+        $tipeHarga = $row->tipe_harga ?: ($row->nama_bundle ? 'bundle' : 'single');
 
         return [
-            'total_produk_price' => $rows->count(),
-            'total_stock_masuk' => (int) $rows->sum('stock_masuk'),
-            'total_stock_draft' => (int) $rows->sum('stock_draft'),
-            'total_stock_paid' => (int) $rows->sum('stock_paid'),
-            'total_stock_terpakai' => (int) ($rows->sum('stock_draft') + $rows->sum('stock_paid')),
-            'total_stock_po' => (int) $rows->sum('stock_po'),
-            'total_stock_akhir' => (int) $rows->sum('stock_akhir'),
-            'stock_kosong' => $rows->filter(fn ($row) => (int) $row->stock_akhir <= 0)->count(),
-            'stock_menipis' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 0 && (int) $row->stock_akhir <= 10)->count(),
-            'stock_aman' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 10)->count(),
-        ];
-    }
+            'id' => $row->id,
+            'produk_id' => $row->produk_id,
+            'harga_produk' => $row->harga_produk,
+            'created_at' => $row->created_at,
+            'updated_at' => $row->updated_at,
+            'event_id' => $row->event_id,
+            'tipe_harga' => $tipeHarga,
+            'nama_bundle' => $row->nama_bundle,
 
-    private function getEventStatusDemography()
-    {
-        $today = now()->toDateString();
+            'display_name' => $tipeHarga === 'bundle'
+                ? ($row->nama_bundle ?: 'Bundle Tanpa Nama')
+                : ($row->nama_produk ?: '-'),
 
-        return DB::table('data_event')
-            ->whereNull('deleted_at')
-            ->selectRaw("
-                CASE
-                    WHEN valid_until < ? THEN 'Terlewat'
-                    WHEN valid_from > ? THEN 'Akan Datang'
-                    ELSE 'Berjalan'
-                END as label,
-                COUNT(*) as total
-            ", [$today, $today])
-            ->groupByRaw("
-                CASE
-                    WHEN valid_until < ? THEN 'Terlewat'
-                    WHEN valid_from > ? THEN 'Akan Datang'
-                    ELSE 'Berjalan'
-                END
-            ", [$today, $today])
-            ->orderByDesc('total')
-            ->get()
-            ->map(fn ($row) => [
-                'label' => $row->label,
-                'total' => (int) $row->total,
-            ]);
-    }
+            'produk' => $row->produk_id ? [
+                'id' => $row->produk_id,
+                'nama_produk' => $row->nama_produk,
+                'product_number' => $row->product_number,
+                'code_gs1' => $row->code_gs1,
+            ] : null,
 
-    private function getStockStatusDemography(array $filters)
-    {
-        $rows = $this->stockRowsQuery($filters)->get();
-        $total = max($rows->count(), 1);
-
-        $items = collect([
-            [
-                'label' => 'Stok Aman',
-                'total' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 10)->count(),
-            ],
-            [
-                'label' => 'Stok Menipis',
-                'total' => $rows->filter(fn ($row) => (int) $row->stock_akhir > 0 && (int) $row->stock_akhir <= 10)->count(),
-            ],
-            [
-                'label' => 'Stok Kosong',
-                'total' => $rows->filter(fn ($row) => (int) $row->stock_akhir <= 0)->count(),
-            ],
-        ]);
-
-        return $items->map(function ($item) use ($total) {
-            return [
-                'label' => $item['label'],
-                'total' => (int) $item['total'],
-                'percent' => round(((int) $item['total'] / $total) * 100, 2),
-            ];
-        })->values();
-    }
-
-    private function getTransactionTypeDemography(array $filters)
-    {
-        return $this->cartBaseQuery($filters)
-            ->selectRaw("
-                COALESCE(ec.transaction_type, ?) as label,
-                COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as omzet
-            ", [self::TYPE_PEMBELIAN, self::STATUS_PAID])
-            ->groupByRaw('COALESCE(ec.transaction_type, ?)', [self::TYPE_PEMBELIAN])
-            ->orderByDesc('total')
-            ->get()
-            ->map(fn ($row) => [
-                'label' => $row->label,
-                'total' => (int) $row->total,
-                'omzet' => (float) $row->omzet,
-            ]);
-    }
-
-    private function getPaymentStatusDemography(array $filters)
-    {
-        return $this->cartBaseQuery($filters)
-            ->selectRaw("
-                COALESCE(ep.payment_status, ec.status, '-') as label,
-                COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as omzet
-            ", [self::STATUS_PAID])
-            ->groupByRaw("COALESCE(ep.payment_status, ec.status, '-')")
-            ->orderByDesc('total')
-            ->get()
-            ->map(fn ($row) => [
-                'label' => $row->label,
-                'total' => (int) $row->total,
-                'omzet' => (float) $row->omzet,
-            ]);
-    }
-
-    private function getCustomerTypeDemography(array $filters)
-    {
-        return $this->cartBaseQuery($filters)
-            ->selectRaw("
-                CASE
-                    WHEN LOWER(COALESCE(ec.customer, '')) IN (
-                        '',
-                        '-',
-                        'walk in customer',
-                        'walk-in customer',
-                        'walkin customer',
-                        'walkin'
-                    )
-                    THEN 'Walk In Customer'
-                    ELSE 'Customer Bernama'
-                END as label,
-                COUNT(DISTINCT ec.id) as total,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as omzet
-            ", [self::STATUS_PAID])
-            ->groupByRaw("
-                CASE
-                    WHEN LOWER(COALESCE(ec.customer, '')) IN (
-                        '',
-                        '-',
-                        'walk in customer',
-                        'walk-in customer',
-                        'walkin customer',
-                        'walkin'
-                    )
-                    THEN 'Walk In Customer'
-                    ELSE 'Customer Bernama'
-                END
-            ")
-            ->orderByDesc('total')
-            ->get()
-            ->map(fn ($row) => [
-                'label' => $row->label,
-                'total' => (int) $row->total,
-                'omzet' => (float) $row->omzet,
-            ]);
-    }
-
-    private function getTopEvents(array $filters)
-    {
-        return $this->cartBaseQuery($filters)
-            ->selectRaw("
-                de.id as event_id,
-                COALESCE(de.nama_event, '-') as nama_event,
-                COALESCE(de.alamat_event, '-') as alamat_event,
-                COUNT(DISTINCT ec.id) as total_transactions,
-                COALESCE(SUM(ct.total_qty), 0) as total_qty,
-                COALESCE(SUM(
-                    CASE
-                        WHEN ec.status = ?
-                        THEN COALESCE(ep.total_amount, ct.total_amount, 0)
-                        ELSE 0
-                    END
-                ), 0) as omzet
-            ", [self::STATUS_PAID])
-            ->groupBy('de.id', 'de.nama_event', 'de.alamat_event')
-            ->orderByDesc('omzet')
-            ->limit(8)
-            ->get()
-            ->map(fn ($row) => [
-                'event_id' => $row->event_id,
+            'event' => $row->event_id ? [
+                'id' => $row->event_id,
                 'nama_event' => $row->nama_event,
                 'alamat_event' => $row->alamat_event,
-                'total_transactions' => (int) $row->total_transactions,
-                'total_qty' => (int) $row->total_qty,
-                'omzet' => (float) $row->omzet,
-            ]);
-    }
+                'valid_from' => $row->valid_from,
+                'valid_until' => $row->valid_until,
+            ] : null,
 
-    private function getTopProducts(array $filters)
-    {
-        $query = DB::table('event_carts_detail as ecd')
-            ->join('event_carts as ec', 'ec.id', '=', 'ecd.event_carts_id')
-            ->join('produk_price as pp', 'pp.id', '=', 'ecd.produk_price_id')
-            ->leftJoin('produk as p', 'p.id', '=', 'pp.produk_id')
-            ->leftJoin('data_event as de', 'de.id', '=', 'ec.event_id')
-            ->whereNull('ecd.deleted_at')
-            ->whereNull('ec.deleted_at')
-            ->whereNull('pp.deleted_at')
-            ->where('ec.status', self::STATUS_PAID);
-
-        if (!empty($filters['event_id'])) {
-            $query->where('ec.event_id', $filters['event_id']);
-        }
-
-        if (!empty($filters['date_from'])) {
-            $query->whereDate('ec.tanggal_carts', '>=', $filters['date_from']);
-        }
-
-        if (!empty($filters['date_to'])) {
-            $query->whereDate('ec.tanggal_carts', '<=', $filters['date_to']);
-        }
-
-        return $query
-            ->selectRaw("
-                pp.id as produk_price_id,
-                pp.tipe_harga,
-                pp.nama_bundle,
-                pp.harga_produk,
-                p.nama_produk,
-                p.product_number,
-                de.nama_event,
-                COALESCE(SUM(ecd.qty), 0) as total_qty,
-                COALESCE(SUM(ecd.qty * COALESCE(pp.harga_produk, 0)), 0) as omzet,
-                COUNT(DISTINCT ec.id) as total_transactions
-            ")
-            ->groupBy(
-                'pp.id',
-                'pp.tipe_harga',
-                'pp.nama_bundle',
-                'pp.harga_produk',
-                'p.nama_produk',
-                'p.product_number',
-                'de.nama_event'
-            )
-            ->orderByDesc('total_qty')
-            ->orderByDesc('omzet')
-            ->limit(10)
-            ->get()
-            ->map(function ($row) {
-                $isBundle = ($row->tipe_harga ?? 'single') === 'bundle';
-
-                return [
-                    'produk_price_id' => $row->produk_price_id,
-                    'nama_produk' => $isBundle
-                        ? ($row->nama_bundle ?: 'Bundle Tanpa Nama')
-                        : ($row->nama_produk ?: '-'),
-                    'product_number' => $isBundle ? 'BUNDLE' : ($row->product_number ?: '-'),
-                    'tipe_harga' => $row->tipe_harga ?: 'single',
-                    'nama_event' => $row->nama_event ?: '-',
-                    'harga_produk' => (float) ($row->harga_produk ?? 0),
-                    'total_qty' => (int) ($row->total_qty ?? 0),
-                    'omzet' => (float) ($row->omzet ?? 0),
-                    'total_transactions' => (int) ($row->total_transactions ?? 0),
-                ];
-            });
-    }
-
-    private function getRecentTransactions(array $filters)
-    {
-        return $this->cartBaseQuery($filters)
-            ->selectRaw("
-                ec.id,
-                ec.no_invoice,
-                COALESCE(NULLIF(TRIM(ec.customer), ''), 'Walk In Customer') as customer,
-                ec.tanggal_carts,
-                ec.status,
-                COALESCE(ec.transaction_type, ?) as transaction_type,
-                de.nama_event,
-                COALESCE(ct.total_qty, 0) as total_qty,
-                COALESCE(ep.total_amount, ct.total_amount, 0) as total_amount,
-                COALESCE(ep.payment_status, ec.status, '-') as payment_status,
-                COALESCE(pay.payment, '-') as payment_method
-            ", [self::TYPE_PEMBELIAN])
-            ->orderByDesc('ec.tanggal_carts')
-            ->orderByDesc('ec.created_at')
-            ->limit(10)
-            ->get()
-            ->map(fn ($row) => [
-                'id' => $row->id,
-                'no_invoice' => $row->no_invoice,
-                'customer' => $row->customer,
-                'tanggal_carts' => $row->tanggal_carts,
-                'status' => $row->status,
-                'transaction_type' => $row->transaction_type,
-                'nama_event' => $row->nama_event ?: '-',
-                'total_qty' => (int) $row->total_qty,
-                'total_amount' => (float) $row->total_amount,
-                'payment_status' => $row->payment_status,
-                'payment_method' => $row->payment_method,
-            ]);
+            'bundle_details' => $tipeHarga === 'bundle'
+                ? $this->getBundleDetails($row->id)
+                : [],
+        ];
     }
 }
