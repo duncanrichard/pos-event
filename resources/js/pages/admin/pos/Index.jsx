@@ -1241,18 +1241,58 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                     <div className="space-y-3">
                         {cart.details?.map((detail) => {
                             const produkPrice = detail.produk_price || detail.produkPrice || {};
-                            const produk = produkPrice.produk || {};
+                            const produk = detail.produk || produkPrice.produk || {};
                             const isBundle = (produkPrice.tipe_harga || "single") === "bundle";
                             const bundleDetails =
+                                detail.bundle_details ||
+                                detail.bundleDetails ||
                                 produkPrice.bundle_details ||
                                 produkPrice.bundleDetails ||
                                 [];
 
                             const title = isBundle
-                                ? produkPrice.nama_bundle || produkPrice.display_name || "Bundle Tanpa Nama"
-                                : produk.nama_produk || "-";
+                                ? produkPrice.nama_bundle ||
+                                  detail.nama_bundle ||
+                                  detail.nama_produk ||
+                                  produkPrice.display_name ||
+                                  "Bundle Tanpa Nama"
+                                : detail.nama_produk ||
+                                  produk.nama_produk ||
+                                  produkPrice.nama_produk ||
+                                  "-";
 
-                            const basePrice = Number(detail.base_price_amount ?? produkPrice.harga_produk ?? detail.price_amount ?? 0);
+                            const productNumber =
+                                detail.product_number ||
+                                produk.product_number ||
+                                produkPrice.product_number ||
+                                "-";
+                            const codeGs1 =
+                                detail.code_gs1 ||
+                                produk.code_gs1 ||
+                                produkPrice.code_gs1 ||
+                                "-";
+                            const satuan =
+                                detail.satuan ||
+                                detail.satuan_name ||
+                                produk.satuan?.satuan ||
+                                produk.satuan_name ||
+                                produkPrice.satuan ||
+                                produkPrice.satuan_name ||
+                                "-";
+                            const weight =
+                                detail.weight ??
+                                detail.width ??
+                                produk.weight ??
+                                produk.width ??
+                                produkPrice.weight ??
+                                produkPrice.width ??
+                                "-";
+                            const basePrice = Number(
+                                detail.base_price_amount ??
+                                    produkPrice.harga_produk ??
+                                    detail.price_amount ??
+                                    0
+                            );
                             const finalPrice = Number(detail.price_amount || 0);
                             const discountAmountPerUnit = Number(detail.discount_amount_per_unit || 0);
                             const discountTotalAmount = Number(detail.discount_total_amount || 0);
@@ -1267,62 +1307,41 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                     key={detail.id}
                                     className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
                                 >
-                                    <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-center 2xl:justify-between">
-                                        <div className="min-w-0 overflow-x-auto">
-                                            <div className="flex min-w-max items-center gap-2">
-                                                <p className="whitespace-nowrap text-base font-black leading-6 text-slate-950">
-                                                    {title}
-                                                </p>
-
-                                                <span
-                                                    className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-black ${
-                                                        isBundle
-                                                            ? "bg-blue-50 text-blue-700 ring-1 ring-blue-100"
-                                                            : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
-                                                    }`}
-                                                >
-                                                    {isBundle ? "BUNDLE" : "SATUAN"}
-                                                </span>
-                                            </div>
-
-                                            {isBundle ? (
-                                                <div className="mt-2 rounded-2xl bg-slate-50 p-3">
-                                                    <p className="mb-2 text-[10px] font-black uppercase tracking-wide text-slate-400">
-                                                        Isi Bundle
+                                    <div className="min-w-0">
+                                        <div className="flex flex-wrap items-start justify-between gap-3">
+                                            <div className="min-w-0 flex-1">
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <p className="min-w-0 text-base font-black leading-6 text-slate-950">
+                                                        {title}
                                                     </p>
 
-                                                    {bundleDetails.length > 0 ? (
-                                                        <div className="space-y-1">
-                                                            {bundleDetails.map((bundleDetail, index) => (
-                                                                <div
-                                                                    key={bundleDetail.id || index}
-                                                                    className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-slate-600"
-                                                                >
-                                                                    <span>
-                                                                        {bundleDetail.produk?.nama_produk || "-"}
-                                                                    </span>
-                                                                    <span className="font-black text-slate-950">
-                                                                        x{bundleDetail.qty || 1}
-                                                                    </span>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    ) : (
-                                                        <p className="text-xs font-bold text-slate-400">
-                                                            Isi bundle belum tersedia.
-                                                        </p>
+                                                    <span
+                                                        className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-black ${
+                                                            isBundle
+                                                                ? "bg-blue-50 text-blue-700 ring-1 ring-blue-100"
+                                                                : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
+                                                        }`}
+                                                    >
+                                                        {isBundle ? "BUNDLE" : "SATUAN"}
+                                                    </span>
+                                                </div>
+
+                                                <div className="mt-2 flex flex-wrap gap-2">
+                                                    <ProductMetaBadge label="Nama Produk" value={title} />
+                                                    {!isBundle && (
+                                                        <>
+                                                            <ProductMetaBadge label="PN" value={productNumber} />
+                                                            <ProductMetaBadge label="GS1" value={codeGs1} />
+                                                            <ProductMetaBadge
+                                                                label="Berat / Satuan"
+                                                                value={`${weight || "-"} ${satuan || "-"}`}
+                                                            />
+                                                        </>
                                                     )}
                                                 </div>
-                                            ) : (
-                                                <div className="mt-1 min-w-max">
-                                                    <p className="whitespace-nowrap text-xs font-bold text-slate-400">
-                                                        PN: {produk.product_number || "-"} · GS1:{" "}
-                                                        {produk.code_gs1 || "-"}
-                                                    </p>
-                                                </div>
-                                            )}
+                                            </div>
 
-                                            <div className="mt-3 flex flex-wrap gap-2">
+                                            <div className="flex flex-wrap gap-2">
                                                 {isPoCart ? (
                                                     <StockBadge
                                                         label="PO - Stok Tidak Berkurang"
@@ -1351,8 +1370,58 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                                             </div>
                                         </div>
 
-                                        <div className="min-w-0 overflow-x-auto">
-                                            <div className="flex min-w-max items-center gap-3 2xl:justify-end">
+                                        {isBundle && (
+                                            <div className="mt-3 rounded-2xl bg-slate-50 p-3">
+                                                <p className="mb-2 text-[10px] font-black uppercase tracking-wide text-slate-400">
+                                                    Isi Bundle
+                                                </p>
+
+                                                {bundleDetails.length > 0 ? (
+                                                    <div className="grid gap-2 md:grid-cols-2">
+                                                        {bundleDetails.map((bundleDetail, index) => {
+                                                            const bundleProduk = bundleDetail.produk || {};
+                                                            const bundleSatuan =
+                                                                bundleDetail.satuan ||
+                                                                bundleProduk.satuan?.satuan ||
+                                                                bundleProduk.satuan_name ||
+                                                                "-";
+                                                            const bundleWeight =
+                                                                bundleDetail.weight ??
+                                                                bundleDetail.width ??
+                                                                bundleProduk.weight ??
+                                                                bundleProduk.width ??
+                                                                "-";
+                                                            return (
+                                                                <div
+                                                                    key={bundleDetail.id || index}
+                                                                    className="rounded-xl bg-white px-3 py-2 ring-1 ring-slate-100"
+                                                                >
+                                                                    <div className="flex items-start justify-between gap-2">
+                                                                        <p className="min-w-0 text-xs font-black text-slate-700">
+                                                                            {bundleProduk.nama_produk || "-"}
+                                                                        </p>
+                                                                        <span className="shrink-0 text-xs font-black text-slate-950">
+                                                                            x{bundleDetail.qty || 1}
+                                                                        </span>
+                                                                    </div>
+
+                                                                    <p className="mt-1 text-[11px] font-bold text-slate-400">
+                                                                        Berat / Satuan: {`${bundleWeight || "-"} ${bundleSatuan || "-"}`}
+                                                                    </p>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                ) : (
+                                                    <p className="text-xs font-bold text-slate-400">
+                                                        Isi bundle belum tersedia.
+                                                    </p>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        <div className="mt-4 overflow-x-auto pb-1">
+                                            <div className="flex min-w-max items-center gap-3">
                                                 <div className="flex items-center gap-2">
                                                     <button
                                                         type="button"
@@ -1452,6 +1521,15 @@ function CartItems({ cart, saving, updateQty, deleteItem, isDraftCart, isPoCart 
                 )}
             </div>
         </div>
+    );
+}
+
+function ProductMetaBadge({ label, value }) {
+    return (
+        <span className="rounded-xl bg-slate-50 px-3 py-2 text-[11px] font-black text-slate-600 ring-1 ring-slate-100">
+            <span className="text-slate-400">{label}:</span>{" "}
+            <span className="text-slate-800">{value || "-"}</span>
+        </span>
     );
 }
 
@@ -2502,6 +2580,9 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
             const discountAmountPerUnit = Number(item.discount_amount_per_unit || 0);
 
             const isBundle = item.tipe_harga === "bundle";
+            const itemSatuan = item.satuan || item.satuan_name || "-";
+            const itemWeight = item.weight ?? item.width ?? "-";
+            const itemWeightSatuan = `${itemWeight || "-"} ${itemSatuan || "-"}`;
             const bundleDetails = Array.isArray(item.bundle_details) ? item.bundle_details : [];
             const bundleHtml =
                 isBundle && bundleDetails.length
@@ -2509,7 +2590,11 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
                         <div class="bundle-items">
                             ${bundleDetails
                                 .map((detail) => {
-                                    return `<div>• ${escapeHtml(detail.nama_produk || "-")} x${Number(detail.qty || 1)}</div>`;
+                                    const detailSatuan = detail.satuan || detail.satuan_name || "-";
+                                    const detailWeight = detail.weight ?? detail.width ?? "-";
+                                    const detailWeightSatuan = `${detailWeight || "-"} ${detailSatuan || "-"}`;
+
+                                    return `<div>• ${escapeHtml(detail.nama_produk || "-")} x${Number(detail.qty || 1)} - ${escapeHtml(detailWeightSatuan)}</div>`;
                                 })
                                 .join("")}
                         </div>
@@ -2524,7 +2609,7 @@ function openNotaPdfPreview(nota, targetWindow = null, autoPrint = false) {
                     </div>
                     <div class="item-bottom">
                         <span>${qty} x ${formatRupiah(price)}</span>
-                        <span>${isBundle ? "Bundle" : ""}</span>
+                        <span>${isBundle ? "Bundle" : escapeHtml(itemWeightSatuan)}</span>
                     </div>
                     ${discountAmountPerUnit > 0 ? `<div class="item-bottom"><span>${escapeHtml(discountLabel || "Diskon")}</span><span>Harga awal ${formatRupiah(basePrice)}</span></div>` : ""}
                     ${bundleHtml}
@@ -3082,6 +3167,7 @@ function isCashPaymentMethod(payment) {
 
     return label === "cash";
 }
+
 
 function formatRupiah(value) {
     const rupiah = normalizeMoney(value);

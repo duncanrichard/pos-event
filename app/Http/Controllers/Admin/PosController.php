@@ -56,9 +56,11 @@ class PosController extends Controller
                 $query->whereDate('valid_until', '>=', $today);
             })
             ->with([
-                'produk:id,nama_produk,product_number,code_gs1',
+                'produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'produk.satuan:id,satuan',
                 'bundleDetails:id,produk_price_id,produk_id,qty',
-                'bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                'bundleDetails.produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'bundleDetails.produk.satuan:id,satuan',
             ])
             ->select([
                 'id',
@@ -121,9 +123,11 @@ class PosController extends Controller
                 'event:id,nama_event,alamat_event',
                 'details:id,event_carts_id,produk_price_id,qty,manual_discount_type,manual_discount_value',
                 'details.produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
-                'details.produkPrice.produk:id,nama_produk,product_number,code_gs1',
+                'details.produkPrice.produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'details.produkPrice.produk.satuan:id,satuan',
                 'details.produkPrice.bundleDetails:id,produk_price_id,produk_id,qty',
-                'details.produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                'details.produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'details.produkPrice.bundleDetails.produk.satuan:id,satuan',
                 'payment:id,event_carts_id,payment_id,payment_type,total_amount,paid_amount,dp_amount,change_amount,remaining_amount,payment_status,cashier_user_id',
                 'payment.payment:id,payment',
                 'payment.cashier:id,name,email',
@@ -264,9 +268,11 @@ class PosController extends Controller
 
             $produkPriceQuery = ProdukPrice::query()
                 ->with([
-                    'produk:id,nama_produk,product_number,code_gs1',
+                    'produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'produk.satuan:id,satuan',
                     'bundleDetails:id,produk_price_id,produk_id,qty',
-                    'bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                    'bundleDetails.produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'bundleDetails.produk.satuan:id,satuan',
                 ])
                 ->where('event_id', $cart->event_id);
 
@@ -396,7 +402,8 @@ class PosController extends Controller
                 ->with([
                     'produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
                     'produkPrice.bundleDetails:id,produk_price_id,produk_id,qty',
-                    'produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                    'produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'produkPrice.bundleDetails.produk.satuan:id,satuan',
                 ])
                 ->where('event_carts_id', $cart->id)
                 ->whereNull('deleted_at')
@@ -745,9 +752,11 @@ class PosController extends Controller
                 'event:id,nama_event,alamat_event,valid_from,valid_until',
                 'details:id,event_carts_id,produk_price_id,qty,manual_discount_type,manual_discount_value',
                 'details.produkPrice:id,produk_id,event_id,tipe_harga,nama_bundle,harga_produk',
-                'details.produkPrice.produk:id,nama_produk,product_number,code_gs1',
+                'details.produkPrice.produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'details.produkPrice.produk.satuan:id,satuan',
                 'details.produkPrice.bundleDetails:id,produk_price_id,produk_id,qty',
-                'details.produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                'details.produkPrice.bundleDetails.produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'details.produkPrice.bundleDetails.produk.satuan:id,satuan',
                 'payment',
                 'payment.payment',
                 'payment.cashier:id,name,email',
@@ -825,15 +834,25 @@ class PosController extends Controller
 
             $bundleDetails = $isBundle
                 ? $produkPrice->bundleDetails->map(function ($bundleDetail) {
+                    $bundleSatuan = $bundleDetail->produk?->satuan?->satuan ?? '-';
+                    $bundleWeight = (float) ($bundleDetail->produk?->weight ?? 0);
+
                     return [
                         'produk_id' => $bundleDetail->produk_id,
                         'nama_produk' => $bundleDetail->produk?->nama_produk ?? '-',
                         'product_number' => $bundleDetail->produk?->product_number ?? '-',
                         'code_gs1' => $bundleDetail->produk?->code_gs1 ?? '-',
+                        'satuan' => $bundleSatuan,
+                        'satuan_name' => $bundleSatuan,
+                        'weight' => $bundleWeight,
+                        'unit_weight_label' => trim(($bundleWeight ?: '-') . ' ' . ($bundleSatuan ?: '-')),
                         'qty' => (int) ($bundleDetail->qty ?? 1),
                     ];
                 })->values()
                 : collect();
+
+            $satuan = $isBundle ? '-' : ($produk?->satuan?->satuan ?? '-');
+            $weight = $isBundle ? 0 : (float) ($produk?->weight ?? 0);
 
             return [
                 'produk_id' => $produkPrice?->produk_id,
@@ -845,6 +864,10 @@ class PosController extends Controller
                     : ($produk?->nama_produk ?? '-'),
                 'product_number' => $isBundle ? 'BUNDLE' : ($produk?->product_number ?? '-'),
                 'code_gs1' => $isBundle ? '-' : ($produk?->code_gs1 ?? '-'),
+                'satuan' => $satuan,
+                'satuan_name' => $satuan,
+                'weight' => $weight,
+                'unit_weight_label' => $isBundle ? 'Bundle' : trim(($weight ?: '-') . ' ' . ($satuan ?: '-')),
                 'qty' => $qty,
                 'harga_awal' => $basePrice,
                 'harga' => $price,
@@ -1078,9 +1101,11 @@ class PosController extends Controller
     ): array {
         $produkPrice = ProdukPrice::query()
             ->with([
-                'produk:id,nama_produk,product_number,code_gs1',
+                'produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'produk.satuan:id,satuan',
                 'bundleDetails:id,produk_price_id,produk_id,qty',
-                'bundleDetails.produk:id,nama_produk,product_number,code_gs1',
+                'bundleDetails.produk:id,nama_produk,product_number,code_gs1,satuan_id,weight',
+                'bundleDetails.produk.satuan:id,satuan',
             ])
             ->find($produkPriceId);
 
@@ -1146,7 +1171,7 @@ class PosController extends Controller
             $componentQty = max((int) ($bundleDetail->qty ?? 1), 1);
 
             $singleProdukPrice = ProdukPrice::query()
-                ->with('produk:id,nama_produk,product_number,code_gs1')
+                ->with('produk:id,nama_produk,product_number,code_gs1,satuan_id,weight')
                 ->where('event_id', $eventId)
                 ->where('produk_id', $bundleDetail->produk_id)
                 ->where(function ($query) {
@@ -1334,6 +1359,9 @@ class PosController extends Controller
                         'nama_produk' => $detail->produk?->nama_produk ?? '-',
                         'product_number' => $detail->produk?->product_number ?? '-',
                         'code_gs1' => $detail->produk?->code_gs1 ?? '-',
+                        'satuan' => $detail->produk?->satuan?->satuan ?? '-',
+                        'satuan_name' => $detail->produk?->satuan?->satuan ?? '-',
+                        'weight' => (float) ($detail->produk?->weight ?? 0),
                     ],
                 ];
             })
@@ -1357,6 +1385,9 @@ class PosController extends Controller
             'product_name' => $namaProduk,
             'product_number' => $productNumber,
             'code_gs1' => $codeGs1,
+            'satuan' => $isBundle ? '-' : ($produk?->satuan?->satuan ?? '-'),
+            'satuan_name' => $isBundle ? '-' : ($produk?->satuan?->satuan ?? '-'),
+            'weight' => $isBundle ? 0 : (float) ($produk?->weight ?? 0),
 
             'produk' => $isBundle
                 ? null
@@ -1365,6 +1396,9 @@ class PosController extends Controller
                     'nama_produk' => $produk?->nama_produk ?? '-',
                     'product_number' => $produk?->product_number ?? '-',
                     'code_gs1' => $produk?->code_gs1 ?? '-',
+                    'satuan' => $produk?->satuan?->satuan ?? '-',
+                    'satuan_name' => $produk?->satuan?->satuan ?? '-',
+                    'weight' => (float) ($produk?->weight ?? 0),
                 ],
 
             'discount_tiers' => $this->getProdukPriceDiscountTiers($produkPrice->id),
